@@ -2,8 +2,6 @@ import type { Activity, TimerState, TimerColor } from '@/types'
 
 export const TIMER_STORAGE_KEY  = 'elim_timer_state'
 export const TIMER_CHANNEL_NAME = 'elim_timer_channel'
-
-// Aliases for backward compatibility
 export const STORAGE_KEY  = TIMER_STORAGE_KEY
 export const CHANNEL_NAME = TIMER_CHANNEL_NAME
 
@@ -37,46 +35,91 @@ export function loadState(): TimerState {
   }
 }
 
-// ── Throttle Pusher calls so we don't flood the API every second ──
-let _timerThrottleTimer: ReturnType<typeof setTimeout> | null = null
-let _pendingTimerState: TimerState | null = null
+// ── Slim timer payload — only what the screen needs to tick ──
+// Activities list is large — screen already has it from localStorage
+// We only push the frequently-changing fields
+interface SlimTimerPayload {
+  currentIndex:    number
+  running:         boolean
+  remaining:       number
+  overtime:        boolean
+  overtimeSeconds: number
+  // Include activities only when they change (not every second)
+  activities?:     Activity[]
+}
+
+let _lastActivitiesHash = ''
+let _lastPushedRunning:   boolean | null = null
+let _lastPushedIndex:     number  | null = null
+let _lastPushedRemaining: number  | null = null
+
+function hashActivities(activities: Activity[]): string {
+  return activities.map(a => `${a.id}:${a.name}:${a.duration}`).join('|')
+}
 
 export function saveAndBroadcast(state: TimerState): void {
   if (typeof window === 'undefined') return
 
-  // Always save locally
   localStorage.setItem(TIMER_STORAGE_KEY, JSON.stringify(state))
 
-  // Same-browser tab sync (instant)
+  // Same-browser tab sync
   try {
     const bc = new BroadcastChannel(TIMER_CHANNEL_NAME)
     bc.postMessage({ type: 'TIMER_UPDATE', state })
     bc.close()
   } catch { /* unavailable */ }
 
-  // Cross-device sync via Pusher API — throttled to once per second
-  // to avoid overwhelming Pusher with every countdown tick
-  _pendingTimerState = state
-  if (!_timerThrottleTimer) {
-    _timerThrottleTimer = setTimeout(() => {
-      if (_pendingTimerState) {
-        pushToServer('TIMER_UPDATE', _pendingTimerState)
-        _pendingTimerState = null
-      }
-      _timerThrottleTimer = null
-    }, 1000)
+  // Cross-device — only push when something meaningful changes
+  const runningChanged = state.running      !== _lastPushedRunning
+  const indexChanged   = state.currentIndex !== _lastPushedIndex
+  // Correct drift if screen is more than 3 seconds off
+  const drift = _lastPushedRemaining !== null
+    ? Math.abs(state.remaining - (_lastPushedRemaining - 1)) > 3
+    : true
+
+  const activitiesHash    = hashActivities(state.activities)
+  const activitiesChanged = activitiesHash !== _lastActivitiesHash
+
+  const shouldPush = runningChanged || indexChanged || drift || activitiesChanged
+
+  if (shouldPush) {
+    _lastPushedRunning   = state.running
+    _lastPushedIndex     = state.currentIndex
+    _lastPushedRemaining = state.remaining
+    _lastActivitiesHash  = activitiesHash
+
+    const payload: SlimTimerPayload = {
+      currentIndex:    state.currentIndex,
+      running:         state.running,
+      remaining:       state.remaining,
+      overtime:        state.overtime,
+      overtimeSeconds: state.overtimeSeconds,
+    }
+
+    // Only include activities when they actually changed
+    if (activitiesChanged) {
+      payload.activities = state.activities
+    }
+
+    pushToServer('TIMER_UPDATE', payload)
   }
 }
 
-export async function pushToServer(type: string, state: unknown): Promise<void> {
+export async function pushToServer(type: string, payload: unknown): Promise<void> {
   try {
+    const body = JSON.stringify({ type, state: payload })
+    // Sanity check — warn if still somehow large
+    if (body.length > 9000) {
+      console.warn(`Pusher payload too large: ${body.length} bytes`)
+      return
+    }
     await fetch('/api/sync', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ type, state }),
+      body,
     })
   } catch (err) {
-    console.warn('Pusher push failed (offline?):', err)
+    console.warn('Pusher push failed:', err)
   }
 }
 

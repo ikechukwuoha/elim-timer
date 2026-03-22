@@ -6,9 +6,7 @@ export const PRESENT_CHANNEL_NAME = 'elim_present_channel'
 
 const DEFAULT_SONGS: Song[] = [
   {
-    id: 1,
-    title: 'Amazing Grace',
-    artist: 'John Newton',
+    id: 1, title: 'Amazing Grace', artist: 'John Newton',
     lines: [
       { id: 1, text: 'Amazing grace! How sweet the sound' },
       { id: 2, text: 'That saved a wretch like me' },
@@ -21,9 +19,7 @@ const DEFAULT_SONGS: Song[] = [
     ],
   },
   {
-    id: 2,
-    title: 'What a Friend We Have in Jesus',
-    artist: 'Joseph M. Scriven',
+    id: 2, title: 'What a Friend We Have in Jesus', artist: 'Joseph M. Scriven',
     lines: [
       { id: 1, text: 'What a friend we have in Jesus' },
       { id: 2, text: 'All our sins and griefs to bear' },
@@ -38,24 +34,14 @@ const DEFAULT_SONGS: Song[] = [
 ]
 
 const DEFAULT_NOTICES: Notice[] = [
-  {
-    id: 1,
-    title: 'Welcome',
-    body: 'Welcome to Elim Christian Garden International.\nWe are glad you are here today.',
-    style: 'default',
-  },
+  { id: 1, title: 'Welcome', body: 'Welcome to Elim Christian Garden International.\nWe are glad you are here today.', style: 'default' },
 ]
 
 export const DEFAULT_PRESENT_STATE: PresentState = {
-  mode:            'timer',
-  activeVerse:     null,
-  songs:           DEFAULT_SONGS,
-  activeSongId:    null,
-  activeLineIndex: 0,
-  images:          [],
-  activeImageId:   null,
-  notices:         DEFAULT_NOTICES,
-  activeNoticeId:  null,
+  mode: 'timer', activeVerse: null,
+  songs: DEFAULT_SONGS, activeSongId: null, activeLineIndex: 0,
+  images: [], activeImageId: null,
+  notices: DEFAULT_NOTICES, activeNoticeId: null,
 }
 
 export function loadPresentState(): PresentState {
@@ -72,88 +58,112 @@ export function loadPresentState(): PresentState {
   }
 }
 
+// ── Slim present payload — strips base64 image data ──────────
+// Images are stored in localStorage on the screen device
+// We only send the image ID and name over Pusher, not the data URL
+interface SlimPresentPayload {
+  mode:            PresentMode
+  activeVerse:     BibleVerse | null
+  activeSongId:    number | null
+  activeLineIndex: number
+  activeImageId:   number | null
+  activeNoticeId:  number | null
+  // Metadata only — no base64 urls
+  songs:    { id: number; title: string; artist?: string; lines: { id: number; text: string }[] }[]
+  images:   { id: number; name: string }[]   // ← no url field
+  notices:  Notice[]
+}
+
+function toSlimPayload(state: PresentState): SlimPresentPayload {
+  return {
+    mode:            state.mode,
+    activeVerse:     state.activeVerse,
+    activeSongId:    state.activeSongId,
+    activeLineIndex: state.activeLineIndex,
+    activeImageId:   state.activeImageId,
+    activeNoticeId:  state.activeNoticeId,
+    songs:           state.songs,
+    images:          state.images.map(img => ({ id: img.id, name: img.name })), // strip url
+    notices:         state.notices,
+  }
+}
+
 export function savePresentState(state: PresentState): void {
   if (typeof window === 'undefined') return
 
-  // Always save locally
+  // Save full state (including image data URLs) to localStorage
   localStorage.setItem(PRESENT_STORAGE_KEY, JSON.stringify(state))
 
-  // Same-browser tab sync
+  // Same-browser tab sync — full state fine here
   try {
     const bc = new BroadcastChannel(PRESENT_CHANNEL_NAME)
     bc.postMessage({ type: 'PRESENT_UPDATE', state })
     bc.close()
   } catch { /* unavailable */ }
 
-  // Cross-device sync via Pusher
-  // Present updates (verse display, song lines) are immediate — no throttle
-  pushToServer('PRESENT_UPDATE', state)
+  // Cross-device — send slim payload (no base64 images)
+  const slim = toSlimPayload(state)
+  const body = JSON.stringify({ type: 'PRESENT_UPDATE', state: slim })
+
+  if (body.length > 9000) {
+    console.warn(`Present payload still large (${body.length} bytes) — songs may be too long`)
+    // Try sending just the essential mode/verse/line info
+    const minimal = {
+      mode:            state.mode,
+      activeVerse:     state.activeVerse,
+      activeSongId:    state.activeSongId,
+      activeLineIndex: state.activeLineIndex,
+      activeImageId:   state.activeImageId,
+      activeNoticeId:  state.activeNoticeId,
+      songs:           state.songs,
+      images:          state.images.map(img => ({ id: img.id, name: img.name })),
+      notices:         state.notices,
+    }
+    pushToServer('PRESENT_UPDATE', minimal)
+    return
+  }
+
+  pushToServer('PRESENT_UPDATE', slim)
 }
 
-// ── Helpers ──────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────
 
 export function setMode(state: PresentState, mode: PresentMode): PresentState {
   return { ...state, mode }
 }
-
 export function displayVerse(state: PresentState, verse: BibleVerse): PresentState {
   return { ...state, mode: 'bible', activeVerse: verse }
 }
-
 export function selectSong(state: PresentState, songId: number): PresentState {
   return { ...state, activeSongId: songId, activeLineIndex: 0 }
 }
-
 export function goToLine(state: PresentState, index: number): PresentState {
   const song = state.songs.find(s => s.id === state.activeSongId)
   if (!song) return state
   const clamped = Math.max(0, Math.min(index, song.lines.length - 1))
   return { ...state, activeLineIndex: clamped, mode: 'song' }
 }
-
 export function displayImage(state: PresentState, imageId: number): PresentState {
   return { ...state, mode: 'image', activeImageId: imageId }
 }
-
 export function displayNotice(state: PresentState, noticeId: number): PresentState {
   return { ...state, mode: 'notice', activeNoticeId: noticeId }
 }
-
 export function addSong(state: PresentState, song: Omit<Song, 'id'>): PresentState {
-  const id = Date.now()
-  return { ...state, songs: [...state.songs, { ...song, id }] }
+  return { ...state, songs: [...state.songs, { ...song, id: Date.now() }] }
 }
-
 export function deleteSong(state: PresentState, songId: number): PresentState {
-  return {
-    ...state,
-    songs:        state.songs.filter(s => s.id !== songId),
-    activeSongId: state.activeSongId === songId ? null : state.activeSongId,
-  }
+  return { ...state, songs: state.songs.filter(s => s.id !== songId), activeSongId: state.activeSongId === songId ? null : state.activeSongId }
 }
-
 export function addImage(state: PresentState, image: Omit<SlideImage, 'id'>): PresentState {
-  const id = Date.now()
-  return { ...state, images: [...state.images, { ...image, id }] }
+  return { ...state, images: [...state.images, { ...image, id: Date.now() }] }
 }
-
 export function deleteImage(state: PresentState, imageId: number): PresentState {
-  return {
-    ...state,
-    images:        state.images.filter(i => i.id !== imageId),
-    activeImageId: state.activeImageId === imageId ? null : state.activeImageId,
-  }
+  return { ...state, images: state.images.filter(i => i.id !== imageId), activeImageId: state.activeImageId === imageId ? null : state.activeImageId }
 }
-
 export function addNotice(state: PresentState, notice: Omit<Notice, 'id'>): PresentState {
-  const id = Date.now()
-  return { ...state, notices: [...state.notices, { ...notice, id }] }
+  return { ...state, notices: [...state.notices, { ...notice, id: Date.now() }] }
 }
-
 export function deleteNotice(state: PresentState, noticeId: number): PresentState {
-  return {
-    ...state,
-    notices:        state.notices.filter(n => n.id !== noticeId),
-    activeNoticeId: state.activeNoticeId === noticeId ? null : state.activeNoticeId,
-  }
+  return { ...state, notices: state.notices.filter(n => n.id !== noticeId), activeNoticeId: state.activeNoticeId === noticeId ? null : state.activeNoticeId }
 }
