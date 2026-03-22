@@ -13,7 +13,6 @@ import ImageView  from '@/components/ImageView'
 const CHURCH_NAME   = 'Elim Christian Garden International'
 const BLINK_AT_SECS = 50
 
-// Pusher keys injected at build time via NEXT_PUBLIC_ prefix
 const PUSHER_KEY     = process.env.NEXT_PUBLIC_PUSHER_KEY     ?? ''
 const PUSHER_CLUSTER = process.env.NEXT_PUBLIC_PUSHER_CLUSTER ?? ''
 
@@ -36,35 +35,56 @@ export default function BigScreen() {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [blinkVisible, setBlinkVisible] = useState(true)
   const [connected,    setConnected]    = useState(false)
-  const localIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const blinkRef         = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // ── Load from localStorage on mount ──────────────────────
+  // The screen runs its OWN local countdown tick
+  // Pusher only syncs when something meaningful changes (start/pause/next/reset)
+  const localTickRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const blinkRef     = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // ── Initial load ─────────────────────────────────────────
   useEffect(() => {
     setTimerState(loadState())
     setPresentState(loadPresentState())
   }, [])
 
-  // ── Local countdown — keeps screen smooth between syncs ──
+  // ── LOCAL COUNTDOWN ───────────────────────────────────────
+  // The screen ticks itself every second when running.
+  // This makes it perfectly smooth regardless of network latency.
+  // Pusher corrections just snap it back if it drifts.
   useEffect(() => {
-    if (!timerState?.running) {
-      if (localIntervalRef.current) { clearInterval(localIntervalRef.current); localIntervalRef.current = null }
-      return
+    if (localTickRef.current) {
+      clearInterval(localTickRef.current)
+      localTickRef.current = null
     }
-    localIntervalRef.current = setInterval(() => {
+
+    if (!timerState?.running) return
+
+    localTickRef.current = setInterval(() => {
       setTimerState(prev => {
         if (!prev?.running) return prev
         const r = prev.remaining - 1
-        return { ...prev, remaining: r, overtime: r < 0, overtimeSeconds: r < 0 ? Math.abs(r) : 0 }
+        return {
+          ...prev,
+          remaining:       r,
+          overtime:        r < 0,
+          overtimeSeconds: r < 0 ? Math.abs(r) : 0,
+        }
       })
     }, 1000)
-    return () => { if (localIntervalRef.current) { clearInterval(localIntervalRef.current); localIntervalRef.current = null } }
-  }, [timerState?.running, timerState?.currentIndex])
 
-  // ── Pusher — cross-device real-time sync ─────────────────
+    return () => {
+      if (localTickRef.current) { clearInterval(localTickRef.current); localTickRef.current = null }
+    }
+  }, [
+    // Only restart tick when these change — NOT on every remaining change
+    timerState?.running,
+    timerState?.currentIndex,
+  ])
+
+  // ── PUSHER — receives corrections from control panel ─────
   useEffect(() => {
     if (!PUSHER_KEY || !PUSHER_CLUSTER) {
-      console.warn('Pusher keys missing — only same-device sync active')
+      console.warn('Pusher keys missing')
       return
     }
     let pusher: import('pusher-js').default | null = null
@@ -73,10 +93,14 @@ export default function BigScreen() {
       pusher = new Pusher(PUSHER_KEY, { cluster: PUSHER_CLUSTER })
       const ch = pusher.subscribe('elim-church')
 
-      ch.bind('pusher:subscription_succeeded', () => { console.log('✅ Pusher connected'); setConnected(true) })
-      ch.bind('pusher:subscription_error',     () => setConnected(false))
+      ch.bind('pusher:subscription_succeeded', () => {
+        console.log('✅ Pusher connected')
+        setConnected(true)
+      })
+      ch.bind('pusher:subscription_error', () => setConnected(false))
 
-      // Merge slim timer payload with full local state (activities stay from localStorage)
+      // TIMER_UPDATE — only sent on start/pause/next/reset/drift correction
+      // Merges with existing state so activities are never lost
       ch.bind('TIMER_UPDATE', (data: Partial<TimerState>) => {
         setTimerState(prev => {
           const base = prev ?? loadState()
@@ -92,7 +116,8 @@ export default function BigScreen() {
         })
       })
 
-      // Merge slim present payload — images keep their local data URLs
+      // PRESENT_UPDATE — instant, no throttle on sender side
+      // Merge to preserve local image data URLs
       ch.bind('PRESENT_UPDATE', (data: Partial<PresentState>) => {
         setPresentState(prev => {
           const base = prev ?? loadPresentState()
@@ -100,7 +125,7 @@ export default function BigScreen() {
             ...base,
             ...data,
             images: (data.images ?? []).map(slim => {
-              const local = base.images.find(l => l.id === slim.id)
+              const local = base.images?.find(l => l.id === slim.id)
               return local ?? slim
             }),
           }
@@ -123,8 +148,12 @@ export default function BigScreen() {
         if (e.data?.type === 'TIMER_UPDATE') {
           setTimerState(prev => {
             const base = prev ?? loadState()
-            return { ...base, ...e.data.state,
-              activities: e.data.state.activities?.length ? e.data.state.activities : base.activities }
+            return {
+              ...base, ...e.data.state,
+              activities: e.data.state.activities?.length
+                ? e.data.state.activities
+                : base.activities,
+            }
           })
         }
       }
@@ -160,23 +189,20 @@ export default function BigScreen() {
     else document.exitFullscreen()
   }
 
-  // ── Guard — never render without a valid full state ───────
-  if (!timerState || !presentState || !timerState.activities || timerState.activities.length === 0) {
+  // ── Guard ─────────────────────────────────────────────────
+  if (!timerState || !presentState || !timerState.activities?.length) {
     return (
       <div style={{ width:'100vw', height:'100vh', background:'#000', display:'flex',
         flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20 }}>
         <div style={{ width:48, height:48, border:'4px solid #1a1a1a', borderTopColor:'#22c55e',
           borderRadius:'50%', animation:'spin 1s linear infinite' }} />
         <p style={{ color:'#555', fontSize:14, fontFamily:'system-ui,sans-serif',
-          letterSpacing:'0.1em', textTransform:'uppercase' }}>
-          Connecting to timer…
-        </p>
+          letterSpacing:'0.1em', textTransform:'uppercase' }}>Connecting…</p>
         <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       </div>
     )
   }
 
-  // ── Derived values ────────────────────────────────────────
   const mode      = presentState.mode
   const isTm      = mode === 'timer'
   const isBlank   = mode === 'blank'
@@ -223,13 +249,11 @@ export default function BigScreen() {
         flexDirection:'column', position:'relative', overflow:'hidden',
         transition:'background 1s ease', fontFamily:'var(--font-inter),system-ui,sans-serif' }}>
 
-        {/* Grid */}
         <div className={isTm?(color==='green'?'bg-g':color==='yellow'?'bg-y':'bg-r'):''}
           style={{ position:'absolute', inset:0, pointerEvents:'none',
             backgroundImage:'linear-gradient(rgba(255,255,255,0.01) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.01) 1px,transparent 1px)',
             backgroundSize:'80px 80px' }} />
 
-        {/* Image background */}
         {mode==='image' && activeImage && (
           <div style={{ position:'absolute', inset:0, zIndex:0 }}><ImageView image={activeImage} /></div>
         )}
@@ -280,9 +304,9 @@ export default function BigScreen() {
           position:'relative', zIndex:mode==='image'?1:'auto' }}>
 
           {isTm && <>
-            <p className="lp" style={{ fontSize:'clamp(14px,2vw,26px)', fontWeight:500, color:'#fff',
-              letterSpacing:'0.35em', textTransform:'uppercase', margin:'0 0 8px',
-              textShadow:`0 0 20px ${theme.glowColor}` }}>{statusTxt}</p>
+            <p className="lp" style={{ fontSize:'clamp(14px,2vw,26px)', fontWeight:500,
+              color:'#fff', letterSpacing:'0.35em', textTransform:'uppercase',
+              margin:'0 0 8px', textShadow:`0 0 20px ${theme.glowColor}` }}>{statusTxt}</p>
             <p className={isCrit?'tx':color==='yellow'?'tw':'tc'}
               style={{ fontFamily:'var(--font-bebas),cursive', fontSize:'min(38vw,38vh)',
                 lineHeight:0.85, color:blinkVisible?theme.timerColor:'transparent',

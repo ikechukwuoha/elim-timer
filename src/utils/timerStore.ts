@@ -35,82 +35,78 @@ export function loadState(): TimerState {
   }
 }
 
-// ── Slim timer payload — only what the screen needs to tick ──
-// Activities list is large — screen already has it from localStorage
-// We only push the frequently-changing fields
-interface SlimTimerPayload {
-  currentIndex:    number
-  running:         boolean
-  remaining:       number
-  overtime:        boolean
-  overtimeSeconds: number
-  // Include activities only when they change (not every second)
-  activities?:     Activity[]
+// ── What we track to detect meaningful changes ────────────────
+let _prev: { running: boolean; index: number; remaining: number; activitiesHash: string } | null = null
+let _driftTimer: ReturnType<typeof setTimeout> | null = null
+
+function hashActivities(a: Activity[]): string {
+  return a.map(x => `${x.id}:${x.name}:${x.duration}`).join('|')
 }
 
-let _lastActivitiesHash = ''
-let _lastPushedRunning:   boolean | null = null
-let _lastPushedIndex:     number  | null = null
-let _lastPushedRemaining: number  | null = null
-
-function hashActivities(activities: Activity[]): string {
-  return activities.map(a => `${a.id}:${a.name}:${a.duration}`).join('|')
+function buildPayload(state: TimerState, includeActivities: boolean) {
+  return {
+    currentIndex:    state.currentIndex,
+    running:         state.running,
+    remaining:       state.remaining,
+    overtime:        state.overtime,
+    overtimeSeconds: state.overtimeSeconds,
+    ...(includeActivities ? { activities: state.activities } : {}),
+  }
 }
 
 export function saveAndBroadcast(state: TimerState): void {
   if (typeof window === 'undefined') return
 
+  // Always save to localStorage
   localStorage.setItem(TIMER_STORAGE_KEY, JSON.stringify(state))
 
-  // Same-browser tab sync
+  // Same-device tab sync — always full state, instant
   try {
     const bc = new BroadcastChannel(TIMER_CHANNEL_NAME)
     bc.postMessage({ type: 'TIMER_UPDATE', state })
     bc.close()
   } catch { /* unavailable */ }
 
-  // Cross-device — only push when something meaningful changes
-  const runningChanged = state.running      !== _lastPushedRunning
-  const indexChanged   = state.currentIndex !== _lastPushedIndex
-  // Correct drift if screen is more than 3 seconds off
-  const drift = _lastPushedRemaining !== null
-    ? Math.abs(state.remaining - (_lastPushedRemaining - 1)) > 3
-    : true
+  const activitiesHash = hashActivities(state.activities)
+  const activitiesChanged = _prev ? activitiesHash !== _prev.activitiesHash : true
+  const runningChanged    = _prev ? state.running !== _prev.running : true
+  const indexChanged      = _prev ? state.currentIndex !== _prev.index : true
 
-  const activitiesHash    = hashActivities(state.activities)
-  const activitiesChanged = activitiesHash !== _lastActivitiesHash
-
-  const shouldPush = runningChanged || indexChanged || drift || activitiesChanged
-
-  if (shouldPush) {
-    _lastPushedRunning   = state.running
-    _lastPushedIndex     = state.currentIndex
-    _lastPushedRemaining = state.remaining
-    _lastActivitiesHash  = activitiesHash
-
-    const payload: SlimTimerPayload = {
-      currentIndex:    state.currentIndex,
-      running:         state.running,
-      remaining:       state.remaining,
-      overtime:        state.overtime,
-      overtimeSeconds: state.overtimeSeconds,
-    }
-
-    // Only include activities when they actually changed
-    if (activitiesChanged) {
-      payload.activities = state.activities
-    }
-
-    pushToServer('TIMER_UPDATE', payload)
+  // ── IMMEDIATE push on important events ───────────────────
+  // Start, pause, next activity, reset, activity list change
+  // These must arrive at the screen instantly — no throttle
+  if (runningChanged || indexChanged || activitiesChanged) {
+    _prev = { running: state.running, index: state.currentIndex, remaining: state.remaining, activitiesHash }
+    // Cancel any pending drift correction — this supersedes it
+    if (_driftTimer) { clearTimeout(_driftTimer); _driftTimer = null }
+    pushToServer('TIMER_UPDATE', buildPayload(state, activitiesChanged))
+    return
   }
+
+  // ── DRIFT CORRECTION every 15 seconds ────────────────────
+  // The screen runs its own local tick so we don't need to push every second.
+  // We just correct any accumulated drift every 15s.
+  // This drastically reduces Pusher message count.
+  const drift = _prev ? Math.abs(state.remaining - (_prev.remaining - (Date.now() % 15000) / 1000)) : 999
+  if (!_driftTimer) {
+    _driftTimer = setTimeout(() => {
+      _driftTimer = null
+      if (_prev) {
+        _prev.remaining = state.remaining
+        pushToServer('TIMER_UPDATE', buildPayload(state, false))
+      }
+    }, 15000)
+  }
+
+  _prev = { ..._prev!, remaining: state.remaining }
+  void drift // suppress unused warning
 }
 
 export async function pushToServer(type: string, payload: unknown): Promise<void> {
   try {
     const body = JSON.stringify({ type, state: payload })
-    // Sanity check — warn if still somehow large
     if (body.length > 9000) {
-      console.warn(`Pusher payload too large: ${body.length} bytes`)
+      console.warn(`Pusher payload too large: ${body.length} bytes — skipping`)
       return
     }
     await fetch('/api/sync', {
