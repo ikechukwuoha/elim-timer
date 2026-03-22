@@ -13,27 +13,24 @@ import ImageView  from '@/components/ImageView'
 const CHURCH_NAME   = 'Elim Christian Garden International'
 const BLINK_AT_SECS = 50
 
+// Pusher keys injected at build time via NEXT_PUBLIC_ prefix
+const PUSHER_KEY     = process.env.NEXT_PUBLIC_PUSHER_KEY     ?? ''
+const PUSHER_CLUSTER = process.env.NEXT_PUBLIC_PUSHER_CLUSTER ?? ''
+
 type ColorTheme = {
   timerColor: string; glowColor: string
   bgGradient: string; labelColor: string; statusText: string
 }
-
 const COLOR_THEMES: Record<TimerColor, ColorTheme> = {
   green:  { timerColor:'#22c55e', glowColor:'rgba(34,197,94,0.5)',   bgGradient:'radial-gradient(ellipse at center,#052e16 0%,#000 75%)', labelColor:'#4ade80', statusText:'Time Remaining' },
   yellow: { timerColor:'#fbbf24', glowColor:'rgba(251,191,36,0.5)',  bgGradient:'radial-gradient(ellipse at center,#2d1f00 0%,#000 75%)', labelColor:'#fcd34d', statusText:'Time Almost Up' },
   red:    { timerColor:'#f87171', glowColor:'rgba(248,113,113,0.6)', bgGradient:'radial-gradient(ellipse at center,#2a0a0a 0%,#000 75%)', labelColor:'#fca5a5', statusText:"Time\u2019s Up!" },
 }
+const PRESENT_BG='radial-gradient(ellipse at center,#0a0a14 0%,#000 75%)'
+const PRESENT_GLOW='rgba(96,165,250,0.45)'
+const PRESENT_COLOR='#93c5fd'
 
-const PRESENT_BG    = 'radial-gradient(ellipse at center,#0a0a14 0%,#000 75%)'
-const PRESENT_GLOW  = 'rgba(96,165,250,0.45)'
-const PRESENT_COLOR = '#93c5fd'
-
-interface Props {
-  pusherKey:     string
-  pusherCluster: string
-}
-
-export default function BigScreen({ pusherKey, pusherCluster }: Props) {
+export default function BigScreen() {
   const [timerState,   setTimerState]   = useState<TimerState | null>(null)
   const [presentState, setPresentState] = useState<PresentState | null>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -42,79 +39,70 @@ export default function BigScreen({ pusherKey, pusherCluster }: Props) {
   const localIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const blinkRef         = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // ── Initial load from localStorage ───────────────────────
+  // ── Load from localStorage on mount ──────────────────────
   useEffect(() => {
     setTimerState(loadState())
     setPresentState(loadPresentState())
   }, [])
 
-  // ── Local countdown so screen stays smooth between Pusher ticks ──
+  // ── Local countdown — keeps screen smooth between syncs ──
   useEffect(() => {
-    if (!timerState) return
-    if (timerState.running && timerState.remaining > -3600) {
-      localIntervalRef.current = setInterval(() => {
-        setTimerState(prev => {
-          if (!prev || !prev.running) return prev
-          const newRemaining = prev.remaining - 1
-          return {
-            ...prev,
-            remaining:       newRemaining,
-            overtime:        newRemaining < 0,
-            overtimeSeconds: newRemaining < 0 ? Math.abs(newRemaining) : 0,
-          }
-        })
-      }, 1000)
-    } else {
+    if (!timerState?.running) {
       if (localIntervalRef.current) { clearInterval(localIntervalRef.current); localIntervalRef.current = null }
+      return
     }
+    localIntervalRef.current = setInterval(() => {
+      setTimerState(prev => {
+        if (!prev?.running) return prev
+        const r = prev.remaining - 1
+        return { ...prev, remaining: r, overtime: r < 0, overtimeSeconds: r < 0 ? Math.abs(r) : 0 }
+      })
+    }, 1000)
     return () => { if (localIntervalRef.current) { clearInterval(localIntervalRef.current); localIntervalRef.current = null } }
   }, [timerState?.running, timerState?.currentIndex])
 
-  // ── Pusher — cross-device real-time sync ──────────────────
-  // Keys come in as props from the server component — never undefined
+  // ── Pusher — cross-device real-time sync ─────────────────
   useEffect(() => {
-    if (!pusherKey || !pusherCluster) {
-      console.warn('Pusher keys not provided — add NEXT_PUBLIC_PUSHER_KEY and NEXT_PUBLIC_PUSHER_CLUSTER to .env.local')
+    if (!PUSHER_KEY || !PUSHER_CLUSTER) {
+      console.warn('Pusher keys missing — only same-device sync active')
       return
     }
-
-    let pusherInstance: import('pusher-js').default | null = null
+    let pusher: import('pusher-js').default | null = null
 
     import('pusher-js').then(({ default: Pusher }) => {
-      pusherInstance = new Pusher(pusherKey, {
-        cluster: pusherCluster,
-      })
+      pusher = new Pusher(PUSHER_KEY, { cluster: PUSHER_CLUSTER })
+      const ch = pusher.subscribe('elim-church')
 
-      const channel = pusherInstance.subscribe('elim-church')
+      ch.bind('pusher:subscription_succeeded', () => { console.log('✅ Pusher connected'); setConnected(true) })
+      ch.bind('pusher:subscription_error',     () => setConnected(false))
 
-      channel.bind('pusher:subscription_succeeded', () => {
-        console.log('✅ Pusher connected to elim-church')
-        setConnected(true)
-      })
-
-      channel.bind('pusher:subscription_error', (err: unknown) => {
-        console.error('❌ Pusher subscription error:', err)
-        setConnected(false)
-      })
-
-      channel.bind('TIMER_UPDATE', (data: TimerState) => {
-        console.log('📡 Received TIMER_UPDATE via Pusher')
-        setTimerState(data)
-        localStorage.setItem('elim_timer_state', JSON.stringify(data))
-      })
-
-      channel.bind('PRESENT_UPDATE', (data: PresentState) => {
-        console.log('📡 Received PRESENT_UPDATE via Pusher')
-        // Pusher payload has no image URLs (stripped to save bandwidth)
-        // Merge with locally stored images which have the actual data URLs
-        setPresentState(prev => {
-          const localImages = prev?.images ?? []
-          const merged: PresentState = {
+      // Merge slim timer payload with full local state (activities stay from localStorage)
+      ch.bind('TIMER_UPDATE', (data: Partial<TimerState>) => {
+        setTimerState(prev => {
+          const base = prev ?? loadState()
+          const merged: TimerState = {
+            ...base,
             ...data,
-            images: data.images?.map(slim => {
-              const local = localImages.find(l => l.id === slim.id)
+            activities: (data.activities && data.activities.length > 0)
+              ? data.activities
+              : base.activities,
+          }
+          localStorage.setItem('elim_timer_state', JSON.stringify(merged))
+          return merged
+        })
+      })
+
+      // Merge slim present payload — images keep their local data URLs
+      ch.bind('PRESENT_UPDATE', (data: Partial<PresentState>) => {
+        setPresentState(prev => {
+          const base = prev ?? loadPresentState()
+          const merged: PresentState = {
+            ...base,
+            ...data,
+            images: (data.images ?? []).map(slim => {
+              const local = base.images.find(l => l.id === slim.id)
               return local ?? slim
-            }) ?? localImages,
+            }),
           }
           localStorage.setItem('elim_present_state', JSON.stringify(merged))
           return merged
@@ -122,12 +110,8 @@ export default function BigScreen({ pusherKey, pusherCluster }: Props) {
       })
     })
 
-    return () => {
-      pusherInstance?.unsubscribe('elim-church')
-      pusherInstance?.disconnect()
-      setConnected(false)
-    }
-  }, [pusherKey, pusherCluster])
+    return () => { pusher?.unsubscribe('elim-church'); pusher?.disconnect(); setConnected(false) }
+  }, [])
 
   // ── BroadcastChannel — same-device fallback ───────────────
   useEffect(() => {
@@ -135,16 +119,26 @@ export default function BigScreen({ pusherKey, pusherCluster }: Props) {
     let pbc: BroadcastChannel | null = null
     try {
       tbc = new BroadcastChannel(TIMER_CHANNEL_NAME)
-      tbc.onmessage = (e) => { if (e.data?.type === 'TIMER_UPDATE')   setTimerState(e.data.state) }
+      tbc.onmessage = (e) => {
+        if (e.data?.type === 'TIMER_UPDATE') {
+          setTimerState(prev => {
+            const base = prev ?? loadState()
+            return { ...base, ...e.data.state,
+              activities: e.data.state.activities?.length ? e.data.state.activities : base.activities }
+          })
+        }
+      }
       pbc = new BroadcastChannel(PRESENT_CHANNEL_NAME)
-      pbc.onmessage = (e) => { if (e.data?.type === 'PRESENT_UPDATE') setPresentState(e.data.state) }
+      pbc.onmessage = (e) => {
+        if (e.data?.type === 'PRESENT_UPDATE') setPresentState(e.data.state)
+      }
     } catch { /* unavailable */ }
     return () => { tbc?.close(); pbc?.close() }
   }, [])
 
   // ── Blink at ≤ 50s ────────────────────────────────────────
   useEffect(() => {
-    const should = timerState ? timerState.remaining <= BLINK_AT_SECS && presentState?.mode === 'timer' : false
+    const should = !!timerState && timerState.remaining <= BLINK_AT_SECS && presentState?.mode === 'timer'
     if (should) {
       if (!blinkRef.current) blinkRef.current = setInterval(() => setBlinkVisible(v => !v), 500)
     } else {
@@ -166,26 +160,37 @@ export default function BigScreen({ pusherKey, pusherCluster }: Props) {
     else document.exitFullscreen()
   }
 
-  if (!timerState || !presentState) return (
-    <div style={{ width:'100vw', height:'100vh', background:'#000', display:'flex',
-      alignItems:'center', justifyContent:'center', color:'#333', fontSize:24 }}>
-      Loading…
-    </div>
-  )
+  // ── Guard — never render without a valid full state ───────
+  if (!timerState || !presentState || !timerState.activities || timerState.activities.length === 0) {
+    return (
+      <div style={{ width:'100vw', height:'100vh', background:'#000', display:'flex',
+        flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20 }}>
+        <div style={{ width:48, height:48, border:'4px solid #1a1a1a', borderTopColor:'#22c55e',
+          borderRadius:'50%', animation:'spin 1s linear infinite' }} />
+        <p style={{ color:'#555', fontSize:14, fontFamily:'system-ui,sans-serif',
+          letterSpacing:'0.1em', textTransform:'uppercase' }}>
+          Connecting to timer…
+        </p>
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      </div>
+    )
+  }
 
+  // ── Derived values ────────────────────────────────────────
   const mode      = presentState.mode
   const isTm      = mode === 'timer'
   const isBlank   = mode === 'blank'
-  const current   = timerState.activities[timerState.currentIndex]
+  const idx       = Math.min(timerState.currentIndex, timerState.activities.length - 1)
+  const current   = timerState.activities[idx]
   const color     = getTimerColor(timerState.remaining, current.duration * 60)
   const theme     = COLOR_THEMES[color]
   const pct       = Math.max(0, Math.min(100, (timerState.remaining / (current.duration * 60)) * 100))
-  const hasNext   = timerState.currentIndex < timerState.activities.length - 1
+  const hasNext   = idx < timerState.activities.length - 1
   const statusTxt = timerState.overtime ? 'OVERTIME' : theme.statusText
   const isCrit    = timerState.remaining <= BLINK_AT_SECS
-  const activeSong   = presentState.songs.find(s => s.id === presentState.activeSongId)
-  const activeImage  = presentState.images.find(i => i.id === presentState.activeImageId)
-  const activeNotice = presentState.notices.find(n => n.id === presentState.activeNoticeId)
+  const activeSong   = presentState.songs?.find(s => s.id === presentState.activeSongId)
+  const activeImage  = presentState.images?.find(i => i.id === presentState.activeImageId)
+  const activeNotice = presentState.notices?.find(n => n.id === presentState.activeNoticeId)
   const bg        = isTm ? theme.bgGradient : PRESENT_BG
   const glowColor = isTm ? theme.glowColor  : PRESENT_GLOW
   const mainColor = isTm ? theme.timerColor  : PRESENT_COLOR
@@ -202,6 +207,7 @@ export default function BigScreen({ pusherKey, pusherCluster }: Props) {
         @keyframes bar-p{0%,100%{opacity:.7}50%{opacity:1}}
         @keyframes lbl-p{0%,100%{opacity:.8}50%{opacity:1}}
         @keyframes fade-in{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes spin{to{transform:rotate(360deg)}}
         .tc{animation:calm-pulse 3s ease-in-out infinite}
         .tw{animation:warn-pulse 1.6s ease-in-out infinite}
         .tx{animation:crit-pulse .7s ease-in-out infinite}
@@ -217,13 +223,13 @@ export default function BigScreen({ pusherKey, pusherCluster }: Props) {
         flexDirection:'column', position:'relative', overflow:'hidden',
         transition:'background 1s ease', fontFamily:'var(--font-inter),system-ui,sans-serif' }}>
 
-        {/* grid */}
+        {/* Grid */}
         <div className={isTm?(color==='green'?'bg-g':color==='yellow'?'bg-y':'bg-r'):''}
           style={{ position:'absolute', inset:0, pointerEvents:'none',
             backgroundImage:'linear-gradient(rgba(255,255,255,0.01) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.01) 1px,transparent 1px)',
             backgroundSize:'80px 80px' }} />
 
-        {/* image bg */}
+        {/* Image background */}
         {mode==='image' && activeImage && (
           <div style={{ position:'absolute', inset:0, zIndex:0 }}><ImageView image={activeImage} /></div>
         )}
@@ -233,7 +239,6 @@ export default function BigScreen({ pusherKey, pusherCluster }: Props) {
           justifyContent:'space-between', padding:'14px 32px',
           background:mode==='image'?'rgba(0,0,0,0.55)':'rgba(0,0,0,0.45)',
           borderBottom:`1px solid ${mainColor}30`, zIndex:10 }}>
-
           <div style={{ display:'flex', alignItems:'center', gap:18 }}>
             <div style={{ width:68, height:68, borderRadius:'50%', overflow:'hidden',
               border:`2.5px solid ${mainColor}`, boxShadow:`0 0 20px ${glowColor}`,
@@ -245,63 +250,53 @@ export default function BigScreen({ pusherKey, pusherCluster }: Props) {
                 fontWeight:600, color:'#fff', letterSpacing:'0.1em', textTransform:'uppercase',
                 textShadow:`0 0 24px ${glowColor}`, lineHeight:1.1 }}>{CHURCH_NAME}</p>
               {isTm && <p style={{ fontSize:'clamp(11px,1.1vw,14px)', color:'#fff',
-                letterSpacing:'0.22em', textTransform:'uppercase', fontWeight:400,
-                marginTop:4, textShadow:`0 0 12px ${glowColor}` }}>
-                Activity {timerState.currentIndex+1} of {timerState.activities.length}
+                letterSpacing:'0.22em', textTransform:'uppercase',
+                fontWeight:400, marginTop:4, textShadow:`0 0 12px ${glowColor}` }}>
+                Activity {idx+1} of {timerState.activities.length}
               </p>}
             </div>
           </div>
-
           <div style={{ display:'flex', alignItems:'center', gap:16 }}>
-            {/* Connection indicator */}
-            <div style={{ display:'flex', alignItems:'center', gap:6,
-              fontSize:11, color:'rgba(255,255,255,0.4)', letterSpacing:'0.1em', textTransform:'uppercase' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:11,
+              color:'rgba(255,255,255,0.4)', letterSpacing:'0.1em', textTransform:'uppercase' }}>
               <span style={{ width:8, height:8, borderRadius:'50%', display:'inline-block',
-                background: connected ? '#22c55e' : '#f59e0b',
-                boxShadow: connected ? '0 0 8px #22c55e' : '0 0 8px #f59e0b' }} />
-              {connected ? 'Online' : pusherKey ? 'Connecting…' : 'Local only'}
+                background:connected?'#22c55e':'#f59e0b',
+                boxShadow:connected?'0 0 8px #22c55e':'0 0 8px #f59e0b' }} />
+              {connected?'Online':PUSHER_KEY?'Connecting…':'Local only'}
             </div>
-            {/* Live/Paused */}
-            <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:14,
-              color:'#fff', letterSpacing:'0.14em', textTransform:'uppercase',
-              textShadow:`0 0 10px ${glowColor}` }}>
+            <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:14, color:'#fff',
+              letterSpacing:'0.14em', textTransform:'uppercase', textShadow:`0 0 10px ${glowColor}` }}>
               <span style={{ width:10, height:10, borderRadius:'50%', display:'inline-block',
                 background:timerState.running&&isTm?'#22c55e':'#aaa',
-                boxShadow:timerState.running&&isTm?'0 0 14px #22c55e':'none',
-                transition:'background 0.4s' }} />
+                boxShadow:timerState.running&&isTm?'0 0 14px #22c55e':'none', transition:'background 0.4s' }} />
               {isTm?(timerState.running?'Live':'Paused'):isBlank?'Standby':mode.charAt(0).toUpperCase()+mode.slice(1)}
             </div>
           </div>
         </header>
 
         {/* MAIN */}
-        <main style={{ flex:1, display:'flex', flexDirection:'column',
-          alignItems:'center', justifyContent:'center',
-          padding:isTm?'0 20px 48px':'0', minHeight:0, position:'relative',
-          zIndex:mode==='image'?1:'auto' }}>
+        <main style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center',
+          justifyContent:'center', padding:isTm?'0 20px 48px':'0', minHeight:0,
+          position:'relative', zIndex:mode==='image'?1:'auto' }}>
 
           {isTm && <>
             <p className="lp" style={{ fontSize:'clamp(14px,2vw,26px)', fontWeight:500, color:'#fff',
               letterSpacing:'0.35em', textTransform:'uppercase', margin:'0 0 8px',
               textShadow:`0 0 20px ${theme.glowColor}` }}>{statusTxt}</p>
-
-            <p className={isCrit?'tx':color==='yellow'?'tw':'tc'} style={{
-              fontFamily:'var(--font-bebas),cursive', fontSize:'min(38vw,38vh)',
-              lineHeight:0.85, color:blinkVisible?theme.timerColor:'transparent',
-              letterSpacing:'0.02em', transition:isCrit?'none':'color 1s ease',
-              userSelect:'none', margin:0, textAlign:'center' }}>
+            <p className={isCrit?'tx':color==='yellow'?'tw':'tc'}
+              style={{ fontFamily:'var(--font-bebas),cursive', fontSize:'min(38vw,38vh)',
+                lineHeight:0.85, color:blinkVisible?theme.timerColor:'transparent',
+                letterSpacing:'0.02em', transition:isCrit?'none':'color 1s ease',
+                userSelect:'none', margin:0, textAlign:'center' }}>
               {formatTime(timerState.remaining)}
             </p>
-
             <div style={{ width:180, height:2, margin:'min(2.5vw,2.5vh) 0',
               background:`linear-gradient(to right,transparent,${theme.timerColor},transparent)`,
               borderRadius:1, opacity:0.5, flexShrink:0 }} />
-
             <p style={{ fontFamily:'var(--font-cinzel),serif', fontSize:'min(6vw,6vh)',
               fontWeight:600, color:'#fff', letterSpacing:'0.08em', textAlign:'center',
               textShadow:`0 0 40px ${theme.glowColor},0 2px 8px rgba(0,0,0,0.9)`,
               lineHeight:1.2, maxWidth:'85vw', margin:0 }}>{current.name}</p>
-
             <p style={{ marginTop:'min(1.2vw,1.2vh)', fontSize:'min(1.8vw,1.8vh)', fontWeight:400,
               color:'#fff', letterSpacing:'0.22em', textTransform:'uppercase',
               textShadow:`0 0 12px ${theme.glowColor}`, opacity:0.9, textAlign:'center' }}>
@@ -309,46 +304,35 @@ export default function BigScreen({ pusherKey, pusherCluster }: Props) {
             </p>
           </>}
 
-          {mode==='bible' && presentState.activeVerse && (
-            <div className="fi" style={{ width:'100%', height:'100%', display:'flex', alignItems:'center', justifyContent:'center' }}>
-              <BibleView verse={presentState.activeVerse} glowColor={PRESENT_GLOW} timerColor={PRESENT_COLOR} />
-            </div>
-          )}
-
-          {mode==='song' && activeSong && (
-            <div className="fi" style={{ width:'100%', height:'100%', display:'flex', alignItems:'center', justifyContent:'center' }}>
-              <SongView song={activeSong} lineIndex={presentState.activeLineIndex} glowColor={PRESENT_GLOW} timerColor={PRESENT_COLOR} />
-            </div>
-          )}
-
-          {mode==='notice' && activeNotice && (
-            <div className="fi" style={{ width:'100%', height:'100%', display:'flex', alignItems:'center', justifyContent:'center' }}>
-              <NoticeView notice={activeNotice} glowColor={PRESENT_GLOW} timerColor={PRESENT_COLOR} />
-            </div>
-          )}
-
-          {isBlank && <p style={{ color:'rgba(255,255,255,0.06)', fontSize:14, letterSpacing:'0.2em', textTransform:'uppercase' }}>Standby</p>}
+          {mode==='bible'&&presentState.activeVerse&&(
+            <div className="fi" style={{ width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center' }}>
+              <BibleView verse={presentState.activeVerse} glowColor={PRESENT_GLOW} timerColor={PRESENT_COLOR}/>
+            </div>)}
+          {mode==='song'&&activeSong&&(
+            <div className="fi" style={{ width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center' }}>
+              <SongView song={activeSong} lineIndex={presentState.activeLineIndex} glowColor={PRESENT_GLOW} timerColor={PRESENT_COLOR}/>
+            </div>)}
+          {mode==='notice'&&activeNotice&&(
+            <div className="fi" style={{ width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center' }}>
+              <NoticeView notice={activeNotice} glowColor={PRESENT_GLOW} timerColor={PRESENT_COLOR}/>
+            </div>)}
+          {isBlank&&<p style={{ color:'rgba(255,255,255,0.06)',fontSize:14,letterSpacing:'0.2em',textTransform:'uppercase' }}>Standby</p>}
         </main>
 
-        {/* progress bar */}
-        {isTm && (
-          <div style={{ position:'absolute', bottom:0, left:0, right:0, height:8, background:'rgba(255,255,255,0.06)' }}>
-            <div className="bp" style={{ height:'100%', width:`${pct}%`, background:theme.timerColor,
-              boxShadow:`0 0 18px ${theme.glowColor}`, transition:'width 0.9s linear,background 1s ease' }} />
-          </div>
-        )}
-
-        {isTm && hasNext && (
-          <p style={{ position:'absolute', bottom:22, left:0, right:0, textAlign:'center',
-            fontSize:'clamp(12px,1.3vw,16px)', color:'#fff', letterSpacing:'0.16em',
-            textTransform:'uppercase', textShadow:`0 0 10px ${theme.glowColor}`, opacity:0.9 }}>
-            Next: {timerState.activities[timerState.currentIndex+1].name}
-          </p>
-        )}
-
-        <button onClick={toggleFullscreen} style={{ position:'absolute', bottom:14, right:20,
-          background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.12)',
-          color:'#fff', padding:'6px 16px', borderRadius:6, fontSize:12, cursor:'pointer', zIndex:20 }}>
+        {isTm&&(
+          <div style={{ position:'absolute',bottom:0,left:0,right:0,height:8,background:'rgba(255,255,255,0.06)' }}>
+            <div className="bp" style={{ height:'100%',width:`${pct}%`,background:theme.timerColor,
+              boxShadow:`0 0 18px ${theme.glowColor}`,transition:'width 0.9s linear,background 1s ease' }}/>
+          </div>)}
+        {isTm&&hasNext&&(
+          <p style={{ position:'absolute',bottom:22,left:0,right:0,textAlign:'center',
+            fontSize:'clamp(12px,1.3vw,16px)',color:'#fff',letterSpacing:'0.16em',
+            textTransform:'uppercase',textShadow:`0 0 10px ${theme.glowColor}`,opacity:0.9 }}>
+            Next: {timerState.activities[idx+1].name}
+          </p>)}
+        <button onClick={toggleFullscreen} style={{ position:'absolute',bottom:14,right:20,
+          background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.12)',
+          color:'#fff',padding:'6px 16px',borderRadius:6,fontSize:12,cursor:'pointer',zIndex:20 }}>
           {isFullscreen?'Exit Fullscreen':'Fullscreen ⛶'}
         </button>
       </div>
