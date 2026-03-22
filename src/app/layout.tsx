@@ -35,8 +35,9 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${bebasNeue.variable} ${inter.variable} ${cinzel.variable}`}
+      suppressHydrationWarning={true}
     >
-      <body>{children}</body>
+      <body suppressHydrationWarning={true}>{children}</body>
     </html>
   )
 }

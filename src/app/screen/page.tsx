@@ -48,38 +48,8 @@ export default function BigScreen() {
   }, [])
 
   // ── LOCAL COUNTDOWN ───────────────────────────────────────
-  // The screen ticks itself every second when running.
-  // This makes it perfectly smooth regardless of network latency.
-  // Pusher corrections just snap it back if it drifts.
-  useEffect(() => {
-    if (localTickRef.current) {
-      clearInterval(localTickRef.current)
-      localTickRef.current = null
-    }
-
-    if (!timerState?.running) return
-
-    localTickRef.current = setInterval(() => {
-      setTimerState(prev => {
-        if (!prev?.running) return prev
-        const r = prev.remaining - 1
-        return {
-          ...prev,
-          remaining:       r,
-          overtime:        r < 0,
-          overtimeSeconds: r < 0 ? Math.abs(r) : 0,
-        }
-      })
-    }, 1000)
-
-    return () => {
-      if (localTickRef.current) { clearInterval(localTickRef.current); localTickRef.current = null }
-    }
-  }, [
-    // Only restart tick when these change — NOT on every remaining change
-    timerState?.running,
-    timerState?.currentIndex,
-  ])
+  // Removed: screen should not run its own timer to avoid sync issues.
+  // Rely on broadcasts and frequent polling instead.
 
   // ── PUSHER — receives corrections from control panel ─────
   useEffect(() => {
@@ -163,6 +133,15 @@ export default function BigScreen() {
       }
     } catch { /* unavailable */ }
     return () => { tbc?.close(); pbc?.close() }
+  }, [])
+
+  // ── Fallback poll for sync ───────────────────────────────
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTimerState(loadState())
+      setPresentState(loadPresentState())
+    }, 200)
+    return () => clearInterval(id)
   }, [])
 
   // ── Blink at ≤ 50s ────────────────────────────────────────
