@@ -3,7 +3,7 @@ import type { Activity, TimerState, TimerColor } from '@/types'
 export const TIMER_STORAGE_KEY  = 'elim_timer_state'
 export const TIMER_CHANNEL_NAME = 'elim_timer_channel'
 
-// Keep old names as aliases so existing screen page still works
+// Aliases for backward compatibility
 export const STORAGE_KEY  = TIMER_STORAGE_KEY
 export const CHANNEL_NAME = TIMER_CHANNEL_NAME
 
@@ -37,14 +37,47 @@ export function loadState(): TimerState {
   }
 }
 
+// ── Throttle Pusher calls so we don't flood the API every second ──
+let _timerThrottleTimer: ReturnType<typeof setTimeout> | null = null
+let _pendingTimerState: TimerState | null = null
+
 export function saveAndBroadcast(state: TimerState): void {
   if (typeof window === 'undefined') return
+
+  // Always save locally
   localStorage.setItem(TIMER_STORAGE_KEY, JSON.stringify(state))
+
+  // Same-browser tab sync (instant)
   try {
     const bc = new BroadcastChannel(TIMER_CHANNEL_NAME)
     bc.postMessage({ type: 'TIMER_UPDATE', state })
     bc.close()
   } catch { /* unavailable */ }
+
+  // Cross-device sync via Pusher API — throttled to once per second
+  // to avoid overwhelming Pusher with every countdown tick
+  _pendingTimerState = state
+  if (!_timerThrottleTimer) {
+    _timerThrottleTimer = setTimeout(() => {
+      if (_pendingTimerState) {
+        pushToServer('TIMER_UPDATE', _pendingTimerState)
+        _pendingTimerState = null
+      }
+      _timerThrottleTimer = null
+    }, 1000)
+  }
+}
+
+export async function pushToServer(type: string, state: unknown): Promise<void> {
+  try {
+    await fetch('/api/sync', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ type, state }),
+    })
+  } catch (err) {
+    console.warn('Pusher push failed (offline?):', err)
+  }
 }
 
 export function getTimerColor(remaining: number, totalSeconds: number): TimerColor {

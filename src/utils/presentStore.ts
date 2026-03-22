@@ -1,4 +1,5 @@
 import type { PresentState, PresentMode, BibleVerse, Song, SlideImage, Notice } from '@/types'
+import { pushToServer } from '@/utils/timerStore'
 
 export const PRESENT_STORAGE_KEY  = 'elim_present_state'
 export const PRESENT_CHANNEL_NAME = 'elim_present_channel'
@@ -12,7 +13,7 @@ const DEFAULT_SONGS: Song[] = [
       { id: 1, text: 'Amazing grace! How sweet the sound' },
       { id: 2, text: 'That saved a wretch like me' },
       { id: 3, text: 'I once was lost, but now am found' },
-      { id: 4, text: "Was blind, but now I see" },
+      { id: 4, text: 'Was blind, but now I see' },
       { id: 5, text: "'Twas grace that taught my heart to fear" },
       { id: 6, text: 'And grace my fears relieved' },
       { id: 7, text: 'How precious did that grace appear' },
@@ -63,7 +64,6 @@ export function loadPresentState(): PresentState {
     const raw = localStorage.getItem(PRESENT_STORAGE_KEY)
     if (!raw) return DEFAULT_PRESENT_STATE
     const parsed = JSON.parse(raw) as PresentState
-    // Always keep default songs/notices if store is empty
     if (!parsed.songs?.length)   parsed.songs   = DEFAULT_SONGS
     if (!parsed.notices?.length) parsed.notices = DEFAULT_NOTICES
     return parsed
@@ -74,12 +74,20 @@ export function loadPresentState(): PresentState {
 
 export function savePresentState(state: PresentState): void {
   if (typeof window === 'undefined') return
+
+  // Always save locally
   localStorage.setItem(PRESENT_STORAGE_KEY, JSON.stringify(state))
+
+  // Same-browser tab sync
   try {
     const bc = new BroadcastChannel(PRESENT_CHANNEL_NAME)
     bc.postMessage({ type: 'PRESENT_UPDATE', state })
     bc.close()
   } catch { /* unavailable */ }
+
+  // Cross-device sync via Pusher
+  // Present updates (verse display, song lines) are immediate — no throttle
+  pushToServer('PRESENT_UPDATE', state)
 }
 
 // ── Helpers ──────────────────────────────────────────────────
