@@ -50,6 +50,7 @@ function buildPayload(state: TimerState, includeActivities: boolean) {
     remaining:       state.remaining,
     overtime:        state.overtime,
     overtimeSeconds: state.overtimeSeconds,
+    syncedAt:        Date.now(), // timestamp for smooth interpolation on big screen
     ...(includeActivities ? { activities: state.activities } : {}),
   }
 }

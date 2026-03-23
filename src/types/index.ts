@@ -12,6 +12,7 @@ export interface TimerState {
   remaining: number // seconds
   overtime: boolean
   overtimeSeconds: number
+  syncedAt?: number // timestamp when this state was synced, for smooth interpolation
 }
 
 export type TimerColor = 'green' | 'yellow' | 'red'

@@ -90,13 +90,22 @@ export default function BigScreen() {
       ch.bind('pusher:subscription_error', () => setConnected(false))
 
       // TIMER_UPDATE — only sent on start/pause/next/reset/drift correction
-      // Merges with existing state so activities are never lost
+      // Uses syncedAt timestamp to calculate smooth remaining time
       ch.bind('TIMER_UPDATE', (data: Partial<TimerState>) => {
         setTimerState(prev => {
           const base = prev ?? loadState()
+          
+          // Calculate what remaining should be NOW based on syncedAt timestamp
+          let adjustedRemaining = data.remaining ?? base.remaining
+          if (data.syncedAt && data.running) {
+            const elapsed = (Date.now() - data.syncedAt) / 1000
+            adjustedRemaining = Math.max(0, (data.remaining ?? base.remaining) - Math.round(elapsed))
+          }
+          
           const merged: TimerState = {
             ...base,
             ...data,
+            remaining: adjustedRemaining,
             activities: (data.activities && data.activities.length > 0)
               ? data.activities
               : base.activities,
@@ -138,8 +147,17 @@ export default function BigScreen() {
         if (e.data?.type === 'TIMER_UPDATE') {
           setTimerState(prev => {
             const base = prev ?? loadState()
+            let remaining = e.data.state.remaining ?? base.remaining
+            
+            // Apply timestamp-based interpolation for smooth countdown
+            if (e.data.state.syncedAt && e.data.state.running) {
+              const elapsed = (Date.now() - e.data.state.syncedAt) / 1000
+              remaining = Math.max(0, remaining - Math.round(elapsed))
+            }
+            
             return {
               ...base, ...e.data.state,
+              remaining,
               activities: e.data.state.activities?.length
                 ? e.data.state.activities
                 : base.activities,
