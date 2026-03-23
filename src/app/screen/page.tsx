@@ -48,8 +48,28 @@ export default function BigScreen() {
   }, [])
 
   // ── LOCAL COUNTDOWN ───────────────────────────────────────
-  // Removed: screen should not run its own timer to avoid sync issues.
-  // Rely on broadcasts and frequent polling instead.
+  // Big screen runs its own 1-second countdown for smooth display
+  // Pusher broadcasts from control panel every 2 seconds to correct drift
+  useEffect(() => {
+    if (!timerState) return
+    if (timerState.running) {
+      localTickRef.current = setInterval(() => {
+        setTimerState(prev => {
+          if (!prev || !prev.running) return prev
+          const newRemaining = prev.remaining - 1
+          return {
+            ...prev,
+            remaining: newRemaining,
+            overtime: newRemaining < 0,
+            overtimeSeconds: newRemaining < 0 ? Math.abs(newRemaining) : 0,
+          }
+        })
+      }, 1000)
+    } else {
+      if (localTickRef.current) clearInterval(localTickRef.current)
+    }
+    return () => { if (localTickRef.current) clearInterval(localTickRef.current) }
+  }, [timerState?.running])
 
   // ── PUSHER — receives corrections from control panel ─────
   useEffect(() => {
