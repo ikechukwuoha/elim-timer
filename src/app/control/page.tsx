@@ -25,6 +25,33 @@ const COLOR_MAP: Record<TimerColor, ColorTheme> = {
   red:    { bg: '#1c0a0a', text: '#f87171', border: '#b91c1c' },
 }
 
+// ── Epoch helpers ─────────────────────────────────────────────
+// Call these whenever the timer starts running to stamp the anchor fields.
+// The big screen uses these to compute exact remaining without polling.
+
+/** Stamp epoch anchor fields onto a state that is about to start running. */
+function withStartAnchor(p: TimerState, remaining?: number): TimerState {
+  const r = remaining ?? p.remaining
+  return {
+    ...p,
+    running:          true,
+    remaining:        r,
+    startedAt:        Date.now(),
+    remainingAtStart: r,
+  }
+}
+
+/** Clear epoch anchor fields when the timer is paused or reset. */
+function withPauseAnchor(p: TimerState, remaining?: number): TimerState {
+  return {
+    ...p,
+    running:          false,
+    remaining:        remaining ?? p.remaining,
+    startedAt:        null,
+    remainingAtStart: null,
+  }
+}
+
 export default function ControlPanel() {
   // ── Core state ────────────────────────────────────────────
   const [activeTab,    setActiveTab]    = useState<Tab>('timer')
@@ -69,8 +96,6 @@ export default function ControlPanel() {
   useEffect(() => {
     setTimerState(loadState())
     setPresentState(loadPresentState())
-    // Don't auto-load all translations — presets load instantly
-    // User can click "Load all" to fetch the full list
   }, [])
 
   // Load books when translation changes
@@ -121,14 +146,19 @@ export default function ControlPanel() {
     })
   }, [])
 
-  // Timer tick
+  // ── Control panel local tick ──────────────────────────────
+  // The control panel still tracks remaining locally for its own display.
+  // This does NOT affect what the big screen shows — the big screen uses
+  // the epoch anchor (startedAt / remainingAtStart), not this value.
   useEffect(() => {
     if (!timerState) return
     if (timerState.running) {
       intervalRef.current = setInterval(() => {
-        updateTimer(prev => {
-          if (!prev.running) return prev
+        setTimerState(prev => {
+          if (!prev || !prev.running) return prev
           const newRemaining = prev.remaining - 1
+          // Update local display only — saveAndBroadcast is NOT called here.
+          // Broadcasting happens only on control events (start/pause/next/reset).
           return {
             ...prev,
             remaining:       newRemaining,
@@ -141,41 +171,58 @@ export default function ControlPanel() {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
     return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
-  }, [timerState?.running, updateTimer])
+  }, [timerState?.running])
 
   // ── Timer actions ─────────────────────────────────────────
-  const startPause = () => updateTimer(p => ({ ...p, running: !p.running }))
+
+  const startPause = () => updateTimer(p => {
+    if (p.running) {
+      // PAUSE — freeze remaining, clear epoch anchor
+      return withPauseAnchor(p, p.remaining)
+    } else {
+      // START / RESUME — stamp epoch anchor with current remaining
+      return withStartAnchor(p, p.remaining)
+    }
+  })
 
   const goNext = () => updateTimer(p => {
-    const next = p.currentIndex + 1
-    if (next >= p.activities.length) return p
-    return { ...p, currentIndex: next, remaining: p.activities[next].duration * 60,
-      overtime: false, overtimeSeconds: 0, running: p.running }
+    const nextIdx = p.currentIndex + 1
+    if (nextIdx >= p.activities.length) return p
+    const nextRemaining = p.activities[nextIdx].duration * 60
+    const base = {
+      ...p,
+      currentIndex:    nextIdx,
+      remaining:       nextRemaining,
+      overtime:        false,
+      overtimeSeconds: 0,
+    }
+    // If timer was running, re-stamp anchor for the new activity
+    return p.running
+      ? withStartAnchor(base, nextRemaining)
+      : withPauseAnchor(base, nextRemaining)
   })
 
   const goPrev = () => updateTimer(p => {
     const idx = Math.max(0, p.currentIndex - 1)
-    return { ...p, currentIndex: idx, remaining: p.activities[idx].duration * 60,
-      overtime: false, overtimeSeconds: 0, running: false }
+    const remaining = p.activities[idx].duration * 60
+    // Prev always pauses (same as original behaviour)
+    return withPauseAnchor({ ...p, currentIndex: idx, overtime: false, overtimeSeconds: 0 }, remaining)
   })
 
-  const resetCurrent = () => updateTimer(p => ({
-    ...p, running: false,
-    remaining: p.activities[p.currentIndex].duration * 60,
-    overtime: false, overtimeSeconds: 0,
-  }))
+  const resetCurrent = () => updateTimer(p => {
+    const remaining = p.activities[p.currentIndex].duration * 60
+    return withPauseAnchor({ ...p, overtime: false, overtimeSeconds: 0 }, remaining)
+  })
 
-  const resetAll = () => updateTimer(p => ({
-    ...p, currentIndex: 0, running: false,
-    remaining: p.activities[0].duration * 60,
-    overtime: false, overtimeSeconds: 0,
-  }))
+  const resetAll = () => updateTimer(p => {
+    const remaining = p.activities[0].duration * 60
+    return withPauseAnchor({ ...p, currentIndex: 0, overtime: false, overtimeSeconds: 0 }, remaining)
+  })
 
-  const selectActivity = (i: number) => updateTimer(p => ({
-    ...p, currentIndex: i,
-    remaining: p.activities[i].duration * 60,
-    overtime: false, overtimeSeconds: 0, running: false,
-  }))
+  const selectActivity = (i: number) => updateTimer(p => {
+    const remaining = p.activities[i].duration * 60
+    return withPauseAnchor({ ...p, currentIndex: i, overtime: false, overtimeSeconds: 0 }, remaining)
+  })
 
   const addActivity = () => {
     if (!newActName.trim()) return
@@ -191,15 +238,20 @@ export default function ControlPanel() {
     const filtered = p.activities.filter(a => a.id !== id)
     if (!filtered.length) return p
     const newIdx = Math.min(p.currentIndex, filtered.length - 1)
-    return { ...p, activities: filtered, currentIndex: newIdx,
-      remaining: filtered[newIdx].duration * 60, overtime: false, overtimeSeconds: 0, running: false }
+    const remaining = filtered[newIdx].duration * 60
+    return withPauseAnchor({ ...p, activities: filtered, currentIndex: newIdx, overtime: false, overtimeSeconds: 0 }, remaining)
   })
 
   const updateDuration = (id: number, duration: number) => {
     updateTimer(p => {
       const activities = p.activities.map((a): Activity => a.id === id ? { ...a, duration } : a)
       const isActive = p.activities[p.currentIndex].id === id
-      return { ...p, activities, remaining: isActive ? duration * 60 : p.remaining }
+      const remaining = isActive ? duration * 60 : p.remaining
+      // If this is the active activity, re-anchor if running
+      if (isActive && p.running) {
+        return withStartAnchor({ ...p, activities }, remaining)
+      }
+      return { ...p, activities, remaining: isActive ? remaining : p.remaining }
     })
     setEditingId(null)
   }
@@ -229,13 +281,11 @@ export default function ControlPanel() {
     ? books.filter(b => b.name.toLowerCase().includes(bookSearch.toLowerCase()))
     : books
 
-  // Parse quick reference like "John 3:16" or "Psalm 23" or "Rom 8:28"
   const handleQuickRef = async () => {
     const raw = quickRef.trim()
     if (!raw) return
     setQuickRefError('')
 
-    // Match patterns: "Book Chapter:Verse" or "Book Chapter"
     const match = raw.match(/^(.+?)\s+(\d+)(?::(\d+))?$/)
     if (!match) {
       setQuickRefError('Format: Book Chapter:Verse  e.g. John 3:16')
@@ -246,7 +296,6 @@ export default function ControlPanel() {
     const chapNum     = parseInt(match[2])
     const verseNum    = match[3] ? parseInt(match[3]) : null
 
-    // Find matching book
     const bookList = books.length > 0 ? books : STANDARD_BOOKS
     const found = bookList.find(b =>
       b.name.toLowerCase().startsWith(bookQuery) ||
@@ -266,14 +315,12 @@ export default function ControlPanel() {
     setShowTranslationList(false)
 
     if (verseNum) {
-      // Load chapter then scroll/highlight that verse
       setBibleLoading(true)
       const { fetchChapter: fc } = await import('@/utils/bibleApi')
       const ch = await fc(selectedTranslation, String(found.bookid), chapNum, found.name)
       if (ch) {
         setChapterVerses(ch.verses)
         setBibleLoading(false)
-        // Auto-display the verse
         const v = ch.verses.find(v => v.verse === verseNum)
         if (v) {
           updatePresent(p => displayVerse(p, {
@@ -336,7 +383,7 @@ export default function ControlPanel() {
   }
 
   // ── Blank / switch modes ──────────────────────────────────
-  const goBlank = () => updatePresent(p => setMode(p, 'blank'))
+  const goBlank    = () => updatePresent(p => setMode(p, 'blank'))
   const goTimerMode = () => updatePresent(p => setMode(p, 'timer'))
 
   if (!timerState || !presentState) return null
@@ -388,7 +435,6 @@ export default function ControlPanel() {
             {t.label}
           </button>
         ))}
-        {/* Current mode badge */}
         <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:10, paddingRight:16 }}>
           <span style={{ fontSize:11, color:'#555', letterSpacing:'0.1em', textTransform:'uppercase' }}>On screen:</span>
           <span style={{
@@ -420,7 +466,6 @@ export default function ControlPanel() {
         {activeTab === 'timer' && (
           <div style={s.twoCol}>
             <aside style={s.left}>
-              {/* Timer card */}
               <div style={{ ...s.timerCard, background: theme.bg, borderColor: theme.border }}>
                 <p style={s.activityLabel}>{current.name}</p>
                 <p style={{ ...s.clockDisplay, color: theme.text }}>{formatTime(timerState.remaining)}</p>
@@ -504,15 +549,11 @@ export default function ControlPanel() {
         {/* ════════════ BIBLE TAB ════════════ */}
         {activeTab === 'bible' && (
           <div style={s.twoCol}>
-            {/* Left: controls */}
             <aside style={{ ...s.left, gap:10 }}>
-
-              {/* ── Quick Reference ── */}
               <p style={s.sectionTitle}>Quick Reference</p>
               <div style={{ display:'flex', gap:6 }}>
                 <input
-                  type="text"
-                  placeholder="e.g. John 3:16 or Romans 8"
+                  type="text" placeholder="e.g. John 3:16 or Romans 8"
                   value={quickRef}
                   onChange={e => { setQuickRef(e.target.value); setQuickRefError('') }}
                   onKeyDown={e => e.key === 'Enter' && handleQuickRef()}
@@ -522,149 +563,80 @@ export default function ControlPanel() {
               </div>
               {quickRefError && <p style={{ fontSize:11, color:'#f87171', marginTop:-4 }}>{quickRefError}</p>}
 
-              {/* ── Translation search ── */}
               <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
                 <p style={s.sectionTitle}>Translation</p>
                 {translations.length <= 16 && (
-                  <button
-                    onClick={() => loadTranslationsData()}
-                    style={{ fontSize:10, color:'#60a5fa', background:'none', border:'none', cursor:'pointer', letterSpacing:'0.05em' }}
-                  >
+                  <button onClick={() => loadTranslationsData()} style={{ fontSize:10, color:'#60a5fa', background:'none', border:'none', cursor:'pointer', letterSpacing:'0.05em' }}>
                     Load all ↓
                   </button>
                 )}
               </div>
-              <input
-                type="text"
-                placeholder="Search version… (KJV, NIV, Yoruba…)"
-                value={translationSearch}
+              <input type="text" placeholder="Search version… (KJV, NIV, Yoruba…)" value={translationSearch}
                 onChange={e => { setTranslationSearch(e.target.value); setShowTranslationList(true) }}
                 onFocus={() => setShowTranslationList(true)}
                 onBlur={() => setTimeout(() => setShowTranslationList(false), 200)}
-                style={{ ...s.addInput, width:'100%' }}
-              />
-              {/* Selected translation badge */}
+                style={{ ...s.addInput, width:'100%' }} />
               {!showTranslationList && (
                 <div style={{ fontSize:12, color:'#60a5fa', background:'#1e3a5f', border:'1px solid #1e40af', borderRadius:6, padding:'4px 10px', display:'flex', justifyContent:'space-between' }}>
                   <span style={{ fontWeight:600 }}>{selectedTranslation}</span>
                   <span style={{ color:'#93c5fd' }}>{translations.find(t => t.id === selectedTranslation)?.name ?? ''}</span>
                 </div>
               )}
-              {/* Inline dropdown list */}
               {showTranslationList && (
-                <div style={{
-                  background:'#1a1a1a', border:'1px solid #333', borderRadius:8,
-                  maxHeight:180, overflowY:'auto',
-                }}>
+                <div style={{ background:'#1a1a1a', border:'1px solid #333', borderRadius:8, maxHeight:180, overflowY:'auto' }}>
                   {filteredTranslations.slice(0, 100).map((t, i) => (
                     <div key={`${t.id}-${i}`}
-                      onMouseDown={() => {
-                        setSelectedTranslation(t.id)
-                        setTranslationSearch('')
-                        setShowTranslationList(false)
-                      }}
-                      style={{
-                        padding:'7px 12px', cursor:'pointer', fontSize:12,
-                        background: t.id === selectedTranslation ? '#1e3a2a' : 'transparent',
-                        color: t.id === selectedTranslation ? '#22c55e' : '#ccc',
-                        borderBottom:'1px solid #1a1a1a',
-                        display:'flex', gap:8, alignItems:'center',
-                      }}
-                    >
+                      onMouseDown={() => { setSelectedTranslation(t.id); setTranslationSearch(''); setShowTranslationList(false) }}
+                      style={{ padding:'7px 12px', cursor:'pointer', fontSize:12, background: t.id === selectedTranslation ? '#1e3a2a' : 'transparent', color: t.id === selectedTranslation ? '#22c55e' : '#ccc', borderBottom:'1px solid #1a1a1a', display:'flex', gap:8, alignItems:'center' }}>
                       <span style={{ fontWeight:700, minWidth:48, color: t.id === selectedTranslation ? '#22c55e' : '#fff' }}>{t.id}</span>
                       <span style={{ flex:1, color:'#888', fontSize:11 }}>{t.name}</span>
                       <span style={{ fontSize:10, color:'#555' }}>{t.language}</span>
                     </div>
                   ))}
-                  {filteredTranslations.length === 0 && (
-                    <p style={{ padding:'12px', fontSize:12, color:'#555', textAlign:'center' }}>No results</p>
-                  )}
+                  {filteredTranslations.length === 0 && <p style={{ padding:'12px', fontSize:12, color:'#555', textAlign:'center' }}>No results</p>}
                 </div>
               )}
 
-              {/* ── Book search ── */}
               <p style={s.sectionTitle}>Book</p>
-              <input
-                type="text"
-                placeholder="Search book…"
-                value={bookSearch}
+              <input type="text" placeholder="Search book…" value={bookSearch}
                 onChange={e => { setBookSearch(e.target.value); setShowBookList(true) }}
                 onFocus={() => setShowBookList(true)}
                 onBlur={() => setTimeout(() => setShowBookList(false), 200)}
-                style={{ ...s.addInput, width:'100%' }}
-              />
-              {/* Selected book badge */}
+                style={{ ...s.addInput, width:'100%' }} />
               {!showBookList && (
                 <div style={{ fontSize:13, color:'#22c55e', background:'#1e3a2a', border:'1px solid #166534', borderRadius:6, padding:'4px 10px' }}>
                   {selectedBook}
                 </div>
               )}
-              {/* Inline book list */}
               {showBookList && (
-                <div style={{
-                  background:'#1a1a1a', border:'1px solid #333', borderRadius:8,
-                  maxHeight:180, overflowY:'auto',
-                }}>
+                <div style={{ background:'#1a1a1a', border:'1px solid #333', borderRadius:8, maxHeight:180, overflowY:'auto' }}>
                   {(filteredBooks.length > 0 ? filteredBooks : Object.entries(BOOK_ID_MAP).filter(([n]) =>
                     !bookSearch || n.toLowerCase().includes(bookSearch.toLowerCase())
                   ).map(([name, numId]) => ({ bookid: parseInt(numId), name, chapters: 0 }))).map(b => (
                     <div key={b.bookid}
-                      onMouseDown={() => {
-                        setSelectedBook(b.name)
-                        setSelectedBookId(String(b.bookid))
-                        setSelectedChapter(1)
-                        setChapterInput('1')
-                        setBookSearch('')
-                        setShowBookList(false)
-                      }}
-                      style={{
-                        padding:'7px 12px', cursor:'pointer', fontSize:13,
-                        background: String(b.bookid) === selectedBookId ? '#1e3a2a' : 'transparent',
-                        color: String(b.bookid) === selectedBookId ? '#22c55e' : '#ccc',
-                        borderBottom:'1px solid #1a1a1a',
-                      }}
-                    >
+                      onMouseDown={() => { setSelectedBook(b.name); setSelectedBookId(String(b.bookid)); setSelectedChapter(1); setChapterInput('1'); setBookSearch(''); setShowBookList(false) }}
+                      style={{ padding:'7px 12px', cursor:'pointer', fontSize:13, background: String(b.bookid) === selectedBookId ? '#1e3a2a' : 'transparent', color: String(b.bookid) === selectedBookId ? '#22c55e' : '#ccc', borderBottom:'1px solid #1a1a1a' }}>
                       {b.name}
                     </div>
                   ))}
                 </div>
               )}
 
-              {/* ── Chapter input ── */}
               <p style={s.sectionTitle}>Chapter</p>
               <div style={{ display:'flex', gap:6, alignItems:'center' }}>
-                <button onClick={() => {
-                  const n = Math.max(1, selectedChapter - 1)
-                  setSelectedChapter(n); setChapterInput(String(n))
-                }} style={{ ...s.ctrlBtn, flex:'none', width:40, padding:'8px 0' }}>◀</button>
-                <input
-                  type="number" min="1"
-                  value={chapterInput}
+                <button onClick={() => { const n = Math.max(1, selectedChapter - 1); setSelectedChapter(n); setChapterInput(String(n)) }} style={{ ...s.ctrlBtn, flex:'none', width:40, padding:'8px 0' }}>◀</button>
+                <input type="number" min="1" value={chapterInput}
                   onChange={e => setChapterInput(e.target.value)}
-                  onBlur={() => {
-                    const n = Math.max(1, parseInt(chapterInput) || 1)
-                    setSelectedChapter(n); setChapterInput(String(n))
-                  }}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') {
-                      const n = Math.max(1, parseInt(chapterInput) || 1)
-                      setSelectedChapter(n); setChapterInput(String(n))
-                    }
-                  }}
-                  style={{ ...s.addInput, flex:1, textAlign:'center', fontSize:18, fontWeight:600 }}
-                />
-                <button onClick={() => {
-                  const n = selectedChapter + 1
-                  setSelectedChapter(n); setChapterInput(String(n))
-                }} style={{ ...s.ctrlBtn, flex:'none', width:40, padding:'8px 0' }}>▶</button>
+                  onBlur={() => { const n = Math.max(1, parseInt(chapterInput) || 1); setSelectedChapter(n); setChapterInput(String(n)) }}
+                  onKeyDown={e => { if (e.key === 'Enter') { const n = Math.max(1, parseInt(chapterInput) || 1); setSelectedChapter(n); setChapterInput(String(n)) } }}
+                  style={{ ...s.addInput, flex:1, textAlign:'center', fontSize:18, fontWeight:600 }} />
+                <button onClick={() => { const n = selectedChapter + 1; setSelectedChapter(n); setChapterInput(String(n)) }} style={{ ...s.ctrlBtn, flex:'none', width:40, padding:'8px 0' }}>▶</button>
               </div>
 
-              {/* ── Verse search ── */}
               <p style={s.sectionTitle}>Search in chapter</p>
               <input type="text" placeholder="Filter verses by keyword…" value={verseSearch}
                 onChange={e => setVerseSearch(e.target.value)} style={{ ...s.addInput, width:'100%' }} />
 
-              {/* ── Active verse on screen ── */}
               {presentState.activeVerse && (
                 <div style={{ background:'#1e3a5f', border:'1px solid #1e40af', borderRadius:10, padding:12 }}>
                   <p style={{ fontSize:10, color:'#60a5fa', letterSpacing:'0.1em', textTransform:'uppercase', marginBottom:6 }}>On Screen</p>
@@ -674,7 +646,6 @@ export default function ControlPanel() {
               )}
             </aside>
 
-            {/* Right: verse list */}
             <main style={s.right}>
               <p style={s.sectionTitle}>
                 {selectedBook} {selectedChapter} — {filteredVerses.length} verse{filteredVerses.length !== 1 ? 's' : ''}
@@ -686,28 +657,14 @@ export default function ControlPanel() {
                     presentState.activeVerse?.book === selectedBook &&
                     presentState.activeVerse?.chapter === selectedChapter
                   return (
-                    <div key={v.verse} style={{
-                      ...s.activityRow,
-                      background:  isActive ? '#1e3a5f' : '#1e1e1e',
-                      borderColor: isActive ? '#1e40af' : '#2a2a2a',
-                      cursor: 'default',
-                      alignItems: 'flex-start',
-                    }}>
-                      <span style={{ ...s.indexBadge, background: isActive?'#3b82f6':'#2a2a2a', color: isActive?'#fff':'#666', flexShrink:0, marginTop:2 }}>
-                        {v.verse}
-                      </span>
+                    <div key={v.verse} style={{ ...s.activityRow, background: isActive ? '#1e3a5f' : '#1e1e1e', borderColor: isActive ? '#1e40af' : '#2a2a2a', cursor: 'default', alignItems: 'flex-start' }}>
+                      <span style={{ ...s.indexBadge, background: isActive?'#3b82f6':'#2a2a2a', color: isActive?'#fff':'#666', flexShrink:0, marginTop:2 }}>{v.verse}</span>
                       <span style={{ flex:1, fontSize:13, color: isActive?'#fff':'#ccc', lineHeight:1.6 }}>{v.text}</span>
-                      <button
-                        onClick={() => displayVerseOnScreen(v.verse, v.text)}
-                        style={{ ...s.addBtn, padding:'6px 14px', fontSize:12, flexShrink:0, marginLeft:8 }}>
-                        Display
-                      </button>
+                      <button onClick={() => displayVerseOnScreen(v.verse, v.text)} style={{ ...s.addBtn, padding:'6px 14px', fontSize:12, flexShrink:0, marginLeft:8 }}>Display</button>
                     </div>
                   )
                 })}
-                {!bibleLoading && filteredVerses.length === 0 && (
-                  <p style={{ color:'#555', textAlign:'center', padding:40 }}>No verses found</p>
-                )}
+                {!bibleLoading && filteredVerses.length === 0 && <p style={{ color:'#555', textAlign:'center', padding:40 }}>No verses found</p>}
               </div>
             </main>
           </div>
@@ -716,7 +673,6 @@ export default function ControlPanel() {
         {/* ════════════ SONGS TAB ════════════ */}
         {activeTab === 'songs' && (
           <div style={s.twoCol}>
-            {/* Left: song list */}
             <aside style={{ ...s.left, gap:12 }}>
               <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
                 <p style={s.sectionTitle}>Song Library</p>
@@ -724,32 +680,19 @@ export default function ControlPanel() {
                   {showSongEditor ? 'Cancel' : '+ New Song'}
                 </button>
               </div>
-
-              {/* Song editor */}
               {showSongEditor && (
                 <div style={{ background:'#1a1a1a', border:'1px solid #2a2a2a', borderRadius:10, padding:14, display:'flex', flexDirection:'column', gap:8 }}>
                   <input type="text" placeholder="Song title *" value={newSongTitle} onChange={e=>setNewSongTitle(e.target.value)} style={s.addInput} />
                   <input type="text" placeholder="Artist (optional)" value={newSongArtist} onChange={e=>setNewSongArtist(e.target.value)} style={s.addInput} />
-                  <textarea placeholder="Paste lyrics here — one line per row…" value={newSongLyrics} onChange={e=>setNewSongLyrics(e.target.value)}
-                    style={{ ...s.addInput, height:140, resize:'vertical' }} />
+                  <textarea placeholder="Paste lyrics here — one line per row…" value={newSongLyrics} onChange={e=>setNewSongLyrics(e.target.value)} style={{ ...s.addInput, height:140, resize:'vertical' }} />
                   <button onClick={saveSong} style={s.addBtn}>Save Song</button>
                 </div>
               )}
-
-              {/* Song list */}
               <div style={s.activityList}>
                 {presentState.songs.map(song => {
                   const isActive = song.id === presentState.activeSongId && presentState.mode === 'song'
                   return (
-                    <div key={song.id} style={{
-                      ...s.activityRow,
-                      background:  isActive ? '#1e3a2a' : '#1e1e1e',
-                      borderColor: isActive ? '#166534' : '#2a2a2a',
-                      flexDirection: 'column',
-                      alignItems:    'flex-start',
-                      gap: 4,
-                      cursor: 'default',
-                    }}>
+                    <div key={song.id} style={{ ...s.activityRow, background: isActive ? '#1e3a2a' : '#1e1e1e', borderColor: isActive ? '#166534' : '#2a2a2a', flexDirection: 'column', alignItems: 'flex-start', gap: 4, cursor: 'default' }}>
                       <div style={{ display:'flex', width:'100%', alignItems:'center', gap:8 }}>
                         <span style={{ flex:1, fontSize:14, fontWeight:600, color: isActive?'#22c55e':'#fff' }}>{song.title}</span>
                         <button onClick={() => presentSong(song.id)} style={{ ...s.addBtn, padding:'5px 12px', fontSize:12 }}>Present</button>
@@ -762,38 +705,23 @@ export default function ControlPanel() {
                 })}
               </div>
             </aside>
-
-            {/* Right: line navigator */}
             <main style={s.right}>
               {activeSong && presentState.mode === 'song' ? (
                 <>
-                  <p style={s.sectionTitle}>
-                    {activeSong.title} — Line {presentState.activeLineIndex + 1} of {activeSong.lines.length}
-                  </p>
-
-                  {/* Prev / Next controls */}
+                  <p style={s.sectionTitle}>{activeSong.title} — Line {presentState.activeLineIndex + 1} of {activeSong.lines.length}</p>
                   <div style={{ display:'flex', gap:8, marginBottom:12 }}>
                     <button onClick={() => songLine(-1)} style={{ ...s.ctrlBtn, flex:1 }} disabled={presentState.activeLineIndex === 0}>◀ Prev Line</button>
                     <button onClick={() => songLine(1)} style={{ ...s.ctrlBtn, flex:1 }} disabled={presentState.activeLineIndex >= activeSong.lines.length - 1}>Next Line ▶</button>
                   </div>
-
-                  {/* All lines */}
                   <div style={s.activityList}>
                     {activeSong.lines.map((line, idx) => {
                       const isActive = idx === presentState.activeLineIndex
                       return (
-                        <div key={line.id}
-                          role="button" tabIndex={0}
+                        <div key={line.id} role="button" tabIndex={0}
                           onClick={() => updatePresent(p => goToLine(p, idx))}
                           onKeyDown={e => e.key==='Enter' && updatePresent(p => goToLine(p, idx))}
-                          style={{
-                            ...s.activityRow,
-                            background:  isActive ? '#1e3a2a' : '#1e1e1e',
-                            borderColor: isActive ? '#166534' : '#2a2a2a',
-                          }}>
-                          <span style={{ ...s.indexBadge, background: isActive?'#22c55e':'#2a2a2a', color: isActive?'#000':'#666' }}>
-                            {idx + 1}
-                          </span>
+                          style={{ ...s.activityRow, background: isActive ? '#1e3a2a' : '#1e1e1e', borderColor: isActive ? '#166534' : '#2a2a2a' }}>
+                          <span style={{ ...s.indexBadge, background: isActive?'#22c55e':'#2a2a2a', color: isActive?'#000':'#666' }}>{idx + 1}</span>
                           <span style={{ flex:1, fontSize:13, color: isActive?'#fff':'#bbb' }}>{line.text}</span>
                         </div>
                       )
@@ -815,24 +743,16 @@ export default function ControlPanel() {
           <div style={s.twoCol}>
             <aside style={{ ...s.left, gap:12 }}>
               <p style={s.sectionTitle}>Upload Images</p>
-              <label style={{
-                display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
-                gap:8, padding:'28px 16px',
-                border:'2px dashed #333', borderRadius:10,
-                cursor:'pointer', color:'#555', fontSize:13,
-                transition:'border-color 0.2s',
-              }}>
+              <label style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, padding:'28px 16px', border:'2px dashed #333', borderRadius:10, cursor:'pointer', color:'#555', fontSize:13 }}>
                 <span style={{ fontSize:28 }}>🖼</span>
                 <span>Click to upload images</span>
                 <span style={{ fontSize:11, color:'#444' }}>PNG, JPG, GIF supported</span>
                 <input type="file" accept="image/*" multiple onChange={handleImageUpload} style={{ display:'none' }} />
               </label>
-
               <p style={{ fontSize:11, color:'#555', letterSpacing:'0.08em', textTransform:'uppercase', marginTop:8 }}>
                 {presentState.images.length} image{presentState.images.length !== 1 ? 's' : ''} uploaded
               </p>
             </aside>
-
             <main style={s.right}>
               <p style={s.sectionTitle}>Image Library</p>
               {presentState.images.length === 0 ? (
@@ -845,24 +765,14 @@ export default function ControlPanel() {
                   {presentState.images.map(img => {
                     const isActive = img.id === presentState.activeImageId && presentState.mode === 'image'
                     return (
-                      <div key={img.id} style={{
-                        border: `2px solid ${isActive ? '#3b82f6' : '#2a2a2a'}`,
-                        borderRadius:10, overflow:'hidden',
-                        background:'#1a1a1a', position:'relative',
-                        cursor:'pointer',
-                      }}>
+                      <div key={img.id} style={{ border: `2px solid ${isActive ? '#3b82f6' : '#2a2a2a'}`, borderRadius:10, overflow:'hidden', background:'#1a1a1a', position:'relative', cursor:'pointer' }}>
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={img.url} alt={img.name}
-                          style={{ width:'100%', height:110, objectFit:'cover', display:'block' }}
-                          onClick={() => updatePresent(p => displayImage(p, img.id))}
-                        />
+                        <img src={img.url} alt={img.name} style={{ width:'100%', height:110, objectFit:'cover', display:'block' }} onClick={() => updatePresent(p => displayImage(p, img.id))} />
                         <div style={{ padding:'6px 8px', display:'flex', alignItems:'center', gap:6 }}>
                           <span style={{ flex:1, fontSize:11, color:'#888', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{img.name}</span>
                           <button onClick={() => updatePresent(p => deleteImage(p, img.id))} style={s.removeBtn}>✕</button>
                         </div>
-                        {isActive && (
-                          <div style={{ position:'absolute', top:6, right:6, background:'#3b82f6', color:'#fff', fontSize:9, padding:'2px 6px', borderRadius:4, fontWeight:700, letterSpacing:'0.08em' }}>LIVE</div>
-                        )}
+                        {isActive && <div style={{ position:'absolute', top:6, right:6, background:'#3b82f6', color:'#fff', fontSize:9, padding:'2px 6px', borderRadius:4, fontWeight:700, letterSpacing:'0.08em' }}>LIVE</div>}
                       </div>
                     )
                   })}
@@ -882,12 +792,10 @@ export default function ControlPanel() {
                   {showNoticeEditor ? 'Cancel' : '+ New Notice'}
                 </button>
               </div>
-
               {showNoticeEditor && (
                 <div style={{ background:'#1a1a1a', border:'1px solid #2a2a2a', borderRadius:10, padding:14, display:'flex', flexDirection:'column', gap:8 }}>
                   <input type="text" placeholder="Title *" value={newNoticeTitle} onChange={e=>setNewNoticeTitle(e.target.value)} style={s.addInput} />
-                  <textarea placeholder="Body text…" value={newNoticeBody} onChange={e=>setNewNoticeBody(e.target.value)}
-                    style={{ ...s.addInput, height:100, resize:'vertical' }} />
+                  <textarea placeholder="Body text…" value={newNoticeBody} onChange={e=>setNewNoticeBody(e.target.value)} style={{ ...s.addInput, height:100, resize:'vertical' }} />
                   <select value={newNoticeStyle} onChange={e => setNewNoticeStyle(e.target.value as Notice['style'])} style={s.fullSelect}>
                     <option value="default">Default</option>
                     <option value="urgent">Urgent</option>
@@ -896,23 +804,15 @@ export default function ControlPanel() {
                   <button onClick={saveNotice} style={s.addBtn}>Save Notice</button>
                 </div>
               )}
-
               <div style={s.activityList}>
                 {presentState.notices.map(notice => {
                   const isActive = notice.id === presentState.activeNoticeId && presentState.mode === 'notice'
                   const styleColors: Record<Notice['style'], string> = { default:'#60a5fa', urgent:'#f87171', celebration:'#fbbf24' }
                   return (
-                    <div key={notice.id} style={{
-                      ...s.activityRow,
-                      background:  isActive ? '#1e3a5f' : '#1e1e1e',
-                      borderColor: isActive ? '#1e40af' : '#2a2a2a',
-                      flexDirection:'column', alignItems:'flex-start', cursor:'default', gap:4,
-                    }}>
+                    <div key={notice.id} style={{ ...s.activityRow, background: isActive ? '#1e3a5f' : '#1e1e1e', borderColor: isActive ? '#1e40af' : '#2a2a2a', flexDirection:'column', alignItems:'flex-start', cursor:'default', gap:4 }}>
                       <div style={{ display:'flex', width:'100%', alignItems:'center', gap:8 }}>
                         <span style={{ flex:1, fontSize:14, fontWeight:600, color: isActive ? '#fff' : '#ccc' }}>{notice.title}</span>
-                        <span style={{ fontSize:10, padding:'2px 8px', borderRadius:4, background:'#1a1a1a', color: styleColors[notice.style], border:`1px solid ${styleColors[notice.style]}40` }}>
-                          {notice.style}
-                        </span>
+                        <span style={{ fontSize:10, padding:'2px 8px', borderRadius:4, background:'#1a1a1a', color: styleColors[notice.style], border:`1px solid ${styleColors[notice.style]}40` }}>{notice.style}</span>
                         <button onClick={() => updatePresent(p => displayNotice(p, notice.id))} style={{ ...s.addBtn, padding:'5px 12px', fontSize:12 }}>Display</button>
                         <button onClick={() => updatePresent(p => deleteNotice(p, notice.id))} style={s.removeBtn}>✕</button>
                       </div>
@@ -922,7 +822,6 @@ export default function ControlPanel() {
                 })}
               </div>
             </aside>
-
             <main style={s.right}>
               <p style={s.sectionTitle}>Preview</p>
               {presentState.activeNoticeId && presentState.mode === 'notice' ? (() => {

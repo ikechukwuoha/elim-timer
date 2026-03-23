@@ -3,7 +3,10 @@
 import { useState, useEffect, useRef } from 'react'
 import Image from 'next/image'
 import type { TimerState, TimerColor, PresentState } from '@/types'
-import { loadState, TIMER_CHANNEL_NAME, getTimerColor, formatTime } from '@/utils/timerStore'
+import {
+  loadState, TIMER_CHANNEL_NAME,
+  getTimerColor, formatTime, computeRemaining,
+} from '@/utils/timerStore'
 import { loadPresentState, PRESENT_CHANNEL_NAME } from '@/utils/presentStore'
 import BibleView  from '@/components/BibleView'
 import SongView   from '@/components/SongView'
@@ -12,10 +15,6 @@ import ImageView  from '@/components/ImageView'
 
 const CHURCH_NAME   = 'Elim Christian Garden International'
 const BLINK_AT_SECS = 50
-
-// Only snap the timer if remote drift exceeds this many seconds.
-// Below this threshold the local tick is trusted and left alone.
-const DRIFT_TOLERANCE_SECS = 2
 
 const PUSHER_KEY     = process.env.NEXT_PUBLIC_PUSHER_KEY     ?? ''
 const PUSHER_CLUSTER = process.env.NEXT_PUBLIC_PUSHER_CLUSTER ?? ''
@@ -40,40 +39,66 @@ export default function BigScreen() {
   const [blinkVisible, setBlinkVisible] = useState(true)
   const [connected,    setConnected]    = useState(false)
 
-  const localTickRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const blinkRef     = useRef<ReturnType<typeof setInterval> | null>(null)
+  // displayRemaining is what we render — computed fresh from epoch anchor every RAF
+  const [displayRemaining, setDisplayRemaining] = useState<number>(0)
+
+  // Keep a ref to timerState so the RAF callback always sees the latest value
+  const timerStateRef = useRef<TimerState | null>(null)
+  const rafRef        = useRef<number | null>(null)
+  const blinkRef      = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // ── Initial load ─────────────────────────────────────────
   useEffect(() => {
-    setTimerState(loadState())
+    const ts = loadState()
+    timerStateRef.current = ts
+    setTimerState(ts)
+    setDisplayRemaining(Math.floor(computeRemaining(ts)))
     setPresentState(loadPresentState())
   }, [])
 
-  // ── LOCAL COUNTDOWN ───────────────────────────────────────
-  // Big screen owns its own 1-second tick. Pusher only corrects drift.
-  // DO NOT touch localStorage in here — that's what broke remote screens.
+  // ── RAF display loop ──────────────────────────────────────
+  // Runs continuously. When running, recomputes remaining from epoch anchor
+  // every frame and updates display only when the integer second changes.
+  // When paused, shows the frozen remaining with no recomputation needed.
   useEffect(() => {
-    if (!timerState) return
-    if (timerState.running) {
-      localTickRef.current = setInterval(() => {
-        setTimerState(prev => {
-          if (!prev || !prev.running) return prev
-          const newRemaining = prev.remaining - 1
-          return {
-            ...prev,
-            remaining:       newRemaining,
-            overtime:        newRemaining < 0,
-            overtimeSeconds: newRemaining < 0 ? Math.abs(newRemaining) : 0,
-          }
-        })
-      }, 1000)
-    } else {
-      if (localTickRef.current) clearInterval(localTickRef.current)
-    }
-    return () => { if (localTickRef.current) clearInterval(localTickRef.current) }
-  }, [timerState?.running])
+    let lastShown: number | null = null
 
-  // ── PUSHER — receives corrections from control panel ─────
+    const tick = () => {
+      const ts = timerStateRef.current
+      if (ts) {
+        const exact = computeRemaining(ts)
+        const floored = Math.floor(exact)
+        if (floored !== lastShown) {
+          lastShown = floored
+          setDisplayRemaining(floored)
+        }
+      }
+      rafRef.current = requestAnimationFrame(tick)
+    }
+
+    rafRef.current = requestAnimationFrame(tick)
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
+  }, []) // runs once, reads timerStateRef on every frame
+
+  // ── Apply incoming update (Pusher or BroadcastChannel) ───
+  const applyUpdate = (incoming: Partial<TimerState>) => {
+    setTimerState(prev => {
+      const base = prev ?? loadState()
+      const merged: TimerState = {
+        ...base,
+        ...incoming,
+        activities: (incoming.activities && incoming.activities.length > 0)
+          ? incoming.activities
+          : base.activities,
+      }
+      // Keep ref in sync so RAF always has fresh data
+      timerStateRef.current = merged
+      localStorage.setItem('elim_timer_state', JSON.stringify(merged))
+      return merged
+    })
+  }
+
+  // ── PUSHER ────────────────────────────────────────────────
   useEffect(() => {
     if (!PUSHER_KEY || !PUSHER_CLUSTER) {
       console.warn('Pusher keys missing')
@@ -85,55 +110,10 @@ export default function BigScreen() {
       pusher = new Pusher(PUSHER_KEY, { cluster: PUSHER_CLUSTER })
       const ch = pusher.subscribe('elim-church')
 
-      ch.bind('pusher:subscription_succeeded', () => {
-        console.log('✅ Pusher connected')
-        setConnected(true)
-      })
-      ch.bind('pusher:subscription_error', () => setConnected(false))
+      ch.bind('pusher:subscription_succeeded', () => setConnected(true))
+      ch.bind('pusher:subscription_error',     () => setConnected(false))
 
-      ch.bind('TIMER_UPDATE', (data: Partial<TimerState>) => {
-        setTimerState(prev => {
-          const base = prev ?? loadState()
-
-          // ── Calculate what the authoritative remaining is RIGHT NOW ──
-          // The control panel stamped syncedAt at send time; account for
-          // network latency so we know exactly where the clock should be.
-          let authoritative = data.remaining ?? base.remaining
-          if (data.syncedAt && data.running) {
-            const elapsed = (Date.now() - data.syncedAt) / 1000
-            authoritative = (data.remaining ?? base.remaining) - Math.round(elapsed)
-          }
-
-          // ── Detect important control events that must apply immediately ──
-          const runningChanged = data.running !== undefined && data.running !== base.running
-          const indexChanged   = data.currentIndex !== undefined && data.currentIndex !== base.currentIndex
-          const activitiesChanged = data.activities && data.activities.length > 0
-
-          // ── Drift check ──────────────────────────────────────────────
-          // If none of the above triggered, only snap if local tick has
-          // drifted too far from the authoritative server value.
-          // This prevents the 2-second Pusher heartbeat from interrupting
-          // the smooth local countdown on remote screens.
-          const drift = Math.abs(base.remaining - authoritative)
-          const shouldSnap = runningChanged || indexChanged || activitiesChanged || drift > DRIFT_TOLERANCE_SECS
-
-          const merged: TimerState = {
-            ...base,
-            ...data,
-            // Only override remaining if something important changed or drift is large
-            remaining: shouldSnap ? authoritative : base.remaining,
-            activities: (data.activities && data.activities.length > 0)
-              ? data.activities
-              : base.activities,
-          }
-
-          // Write to localStorage so same-device BroadcastChannel stays in sync,
-          // but ONLY on this (remote) screen — never let it feed back to the tick.
-          localStorage.setItem('elim_timer_state', JSON.stringify(merged))
-          return merged
-        })
-      })
-
+      ch.bind('TIMER_UPDATE',   (data: Partial<TimerState>)   => applyUpdate(data))
       ch.bind('PRESENT_UPDATE', (data: Partial<PresentState>) => {
         setPresentState(prev => {
           const base = prev ?? loadPresentState()
@@ -161,31 +141,7 @@ export default function BigScreen() {
     try {
       tbc = new BroadcastChannel(TIMER_CHANNEL_NAME)
       tbc.onmessage = (e) => {
-        if (e.data?.type === 'TIMER_UPDATE') {
-          setTimerState(prev => {
-            const base = prev ?? loadState()
-
-            let authoritative = e.data.state.remaining ?? base.remaining
-            if (e.data.state.syncedAt && e.data.state.running) {
-              const elapsed = (Date.now() - e.data.state.syncedAt) / 1000
-              authoritative = Math.max(0, authoritative - Math.round(elapsed))
-            }
-
-            const runningChanged = e.data.state.running !== undefined && e.data.state.running !== base.running
-            const indexChanged   = e.data.state.currentIndex !== undefined && e.data.state.currentIndex !== base.currentIndex
-            const drift = Math.abs(base.remaining - authoritative)
-            const shouldSnap = runningChanged || indexChanged || drift > DRIFT_TOLERANCE_SECS
-
-            return {
-              ...base,
-              ...e.data.state,
-              remaining: shouldSnap ? authoritative : base.remaining,
-              activities: e.data.state.activities?.length
-                ? e.data.state.activities
-                : base.activities,
-            }
-          })
-        }
+        if (e.data?.type === 'TIMER_UPDATE') applyUpdate(e.data.state)
       }
       pbc = new BroadcastChannel(PRESENT_CHANNEL_NAME)
       pbc.onmessage = (e) => {
@@ -195,21 +151,14 @@ export default function BigScreen() {
     return () => { tbc?.close(); pbc?.close() }
   }, [])
 
-  // ── ⛔ REMOVED: 200ms localStorage poll ───────────────────
-  // This was the root cause of jumpy countdowns on remote screens.
-  //
-  // On the control-panel device localStorage is always up-to-date, so
-  // the poll looked harmless locally. On a REMOTE screen localStorage
-  // is only updated when a Pusher message arrives (~every 2s), so the
-  // poll was reading stale values and snapping the display backwards
-  // every 200ms — producing the "9 8 8 7 6 2" skip pattern.
-  //
-  // The local tick + Pusher drift-correction is sufficient for smooth,
-  // accurate display on all devices.
+  // ── NO localStorage poll — intentionally absent ───────────
+  // On a remote device localStorage only updates when Pusher fires.
+  // Polling it caused the jumpy countdown. The RAF loop + epoch anchor
+  // means we never need to poll anything.
 
   // ── Blink at ≤ 50s ────────────────────────────────────────
   useEffect(() => {
-    const should = !!timerState && timerState.remaining <= BLINK_AT_SECS && presentState?.mode === 'timer'
+    const should = displayRemaining <= BLINK_AT_SECS && presentState?.mode === 'timer'
     if (should) {
       if (!blinkRef.current) blinkRef.current = setInterval(() => setBlinkVisible(v => !v), 500)
     } else {
@@ -217,7 +166,7 @@ export default function BigScreen() {
       setBlinkVisible(true)
     }
     return () => { if (blinkRef.current) { clearInterval(blinkRef.current); blinkRef.current = null } }
-  }, [timerState?.remaining, presentState?.mode])
+  }, [displayRemaining, presentState?.mode])
 
   // ── Fullscreen ────────────────────────────────────────────
   useEffect(() => {
@@ -250,12 +199,13 @@ export default function BigScreen() {
   const isBlank   = mode === 'blank'
   const idx       = Math.min(timerState.currentIndex, timerState.activities.length - 1)
   const current   = timerState.activities[idx]
-  const color     = getTimerColor(timerState.remaining, current.duration * 60)
+  const color     = getTimerColor(displayRemaining, current.duration * 60)
   const theme     = COLOR_THEMES[color]
-  const pct       = Math.max(0, Math.min(100, (timerState.remaining / (current.duration * 60)) * 100))
+  const pct       = Math.max(0, Math.min(100, (displayRemaining / (current.duration * 60)) * 100))
   const hasNext   = idx < timerState.activities.length - 1
-  const statusTxt = timerState.overtime ? 'OVERTIME' : theme.statusText
-  const isCrit    = timerState.remaining <= BLINK_AT_SECS
+  const isOvertime   = displayRemaining < 0
+  const statusTxt    = isOvertime ? 'OVERTIME' : theme.statusText
+  const isCrit       = displayRemaining <= BLINK_AT_SECS
   const activeSong   = presentState.songs?.find(s => s.id === presentState.activeSongId)
   const activeImage  = presentState.images?.find(i => i.id === presentState.activeImageId)
   const activeNotice = presentState.notices?.find(n => n.id === presentState.activeNoticeId)
@@ -300,7 +250,6 @@ export default function BigScreen() {
           <div style={{ position:'absolute', inset:0, zIndex:0 }}><ImageView image={activeImage} /></div>
         )}
 
-        {/* HEADER */}
         <header style={{ flexShrink:0, display:'flex', alignItems:'center',
           justifyContent:'space-between', padding:'14px 32px',
           background:mode==='image'?'rgba(0,0,0,0.55)':'rgba(0,0,0,0.45)',
@@ -340,7 +289,6 @@ export default function BigScreen() {
           </div>
         </header>
 
-        {/* MAIN */}
         <main style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center',
           justifyContent:'center', padding:isTm?'0 20px 48px':'0', minHeight:0,
           position:'relative', zIndex:mode==='image'?1:'auto' }}>
@@ -354,7 +302,7 @@ export default function BigScreen() {
                 lineHeight:0.85, color:blinkVisible?theme.timerColor:'transparent',
                 letterSpacing:'0.02em', transition:isCrit?'none':'color 1s ease',
                 userSelect:'none', margin:0, textAlign:'center' }}>
-              {formatTime(timerState.remaining)}
+              {formatTime(displayRemaining)}
             </p>
             <div style={{ width:180, height:2, margin:'min(2.5vw,2.5vh) 0',
               background:`linear-gradient(to right,transparent,${theme.timerColor},transparent)`,

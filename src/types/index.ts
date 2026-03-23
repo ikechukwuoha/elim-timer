@@ -5,14 +5,18 @@ export interface Activity {
   duration: number // minutes
 }
 
-export interface TimerState {
-  activities: Activity[]
-  currentIndex: number
-  running: boolean
-  remaining: number // seconds
-  overtime: boolean
-  overtimeSeconds: number
-  syncedAt?: number // timestamp when this state was synced, for smooth interpolation
+// Add these two fields to your existing TimerState type.
+// Everything else in your types file stays the same.
+
+export type TimerState = {
+  activities:       Activity[]
+  currentIndex:     number
+  running:          boolean
+  remaining:        number
+  overtime:         boolean
+  overtimeSeconds:  number
+  startedAt:        number | null   // ms epoch when timer last started/resumed
+  remainingAtStart: number | null   // seconds on clock at that exact moment
 }
 
 export type TimerColor = 'green' | 'yellow' | 'red'
