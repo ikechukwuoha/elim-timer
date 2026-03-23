@@ -181,7 +181,7 @@ export default function BigScreen() {
   }
 
   // ── Guard ─────────────────────────────────────────────────
-  if (!timerState || !presentState || !timerState.activities?.length) {
+  if (!timerState || !presentState) {
     return (
       <div style={{ width:'100vw', height:'100vh', background:'#000', display:'flex',
         flexDirection:'column', alignItems:'center', justifyContent:'center', gap:20 }}>

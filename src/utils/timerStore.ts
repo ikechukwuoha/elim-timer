@@ -32,7 +32,14 @@ export function loadState(): TimerState {
   if (typeof window === 'undefined') return DEFAULT_STATE
   try {
     const raw = localStorage.getItem(TIMER_STORAGE_KEY)
-    return raw ? (JSON.parse(raw) as TimerState) : DEFAULT_STATE
+    if (!raw) return DEFAULT_STATE
+    const parsed = JSON.parse(raw) as TimerState
+    // Merge with DEFAULT_STATE so missing fields never cause guard failures
+    return {
+      ...DEFAULT_STATE,
+      ...parsed,
+      activities: parsed.activities?.length ? parsed.activities : DEFAULT_ACTIVITIES,
+    }
   } catch {
     return DEFAULT_STATE
   }
