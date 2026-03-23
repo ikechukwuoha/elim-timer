@@ -13,6 +13,10 @@ import ImageView  from '@/components/ImageView'
 const CHURCH_NAME   = 'Elim Christian Garden International'
 const BLINK_AT_SECS = 50
 
+// Only snap the timer if remote drift exceeds this many seconds.
+// Below this threshold the local tick is trusted and left alone.
+const DRIFT_TOLERANCE_SECS = 2
+
 const PUSHER_KEY     = process.env.NEXT_PUBLIC_PUSHER_KEY     ?? ''
 const PUSHER_CLUSTER = process.env.NEXT_PUBLIC_PUSHER_CLUSTER ?? ''
 
@@ -36,8 +40,6 @@ export default function BigScreen() {
   const [blinkVisible, setBlinkVisible] = useState(true)
   const [connected,    setConnected]    = useState(false)
 
-  // The screen runs its OWN local countdown tick
-  // Pusher only syncs when something meaningful changes (start/pause/next/reset)
   const localTickRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const blinkRef     = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -48,8 +50,8 @@ export default function BigScreen() {
   }, [])
 
   // ── LOCAL COUNTDOWN ───────────────────────────────────────
-  // Big screen runs its own 1-second countdown for smooth display
-  // Pusher broadcasts from control panel every 2 seconds to correct drift
+  // Big screen owns its own 1-second tick. Pusher only corrects drift.
+  // DO NOT touch localStorage in here — that's what broke remote screens.
   useEffect(() => {
     if (!timerState) return
     if (timerState.running) {
@@ -59,8 +61,8 @@ export default function BigScreen() {
           const newRemaining = prev.remaining - 1
           return {
             ...prev,
-            remaining: newRemaining,
-            overtime: newRemaining < 0,
+            remaining:       newRemaining,
+            overtime:        newRemaining < 0,
             overtimeSeconds: newRemaining < 0 ? Math.abs(newRemaining) : 0,
           }
         })
@@ -89,34 +91,49 @@ export default function BigScreen() {
       })
       ch.bind('pusher:subscription_error', () => setConnected(false))
 
-      // TIMER_UPDATE — only sent on start/pause/next/reset/drift correction
-      // Uses syncedAt timestamp to calculate smooth remaining time
       ch.bind('TIMER_UPDATE', (data: Partial<TimerState>) => {
         setTimerState(prev => {
           const base = prev ?? loadState()
-          
-          // Calculate what remaining should be NOW based on syncedAt timestamp
-          let adjustedRemaining = data.remaining ?? base.remaining
+
+          // ── Calculate what the authoritative remaining is RIGHT NOW ──
+          // The control panel stamped syncedAt at send time; account for
+          // network latency so we know exactly where the clock should be.
+          let authoritative = data.remaining ?? base.remaining
           if (data.syncedAt && data.running) {
             const elapsed = (Date.now() - data.syncedAt) / 1000
-            adjustedRemaining = Math.max(0, (data.remaining ?? base.remaining) - Math.round(elapsed))
+            authoritative = (data.remaining ?? base.remaining) - Math.round(elapsed)
           }
-          
+
+          // ── Detect important control events that must apply immediately ──
+          const runningChanged = data.running !== undefined && data.running !== base.running
+          const indexChanged   = data.currentIndex !== undefined && data.currentIndex !== base.currentIndex
+          const activitiesChanged = data.activities && data.activities.length > 0
+
+          // ── Drift check ──────────────────────────────────────────────
+          // If none of the above triggered, only snap if local tick has
+          // drifted too far from the authoritative server value.
+          // This prevents the 2-second Pusher heartbeat from interrupting
+          // the smooth local countdown on remote screens.
+          const drift = Math.abs(base.remaining - authoritative)
+          const shouldSnap = runningChanged || indexChanged || activitiesChanged || drift > DRIFT_TOLERANCE_SECS
+
           const merged: TimerState = {
             ...base,
             ...data,
-            remaining: adjustedRemaining,
+            // Only override remaining if something important changed or drift is large
+            remaining: shouldSnap ? authoritative : base.remaining,
             activities: (data.activities && data.activities.length > 0)
               ? data.activities
               : base.activities,
           }
+
+          // Write to localStorage so same-device BroadcastChannel stays in sync,
+          // but ONLY on this (remote) screen — never let it feed back to the tick.
           localStorage.setItem('elim_timer_state', JSON.stringify(merged))
           return merged
         })
       })
 
-      // PRESENT_UPDATE — instant, no throttle on sender side
-      // Merge to preserve local image data URLs
       ch.bind('PRESENT_UPDATE', (data: Partial<PresentState>) => {
         setPresentState(prev => {
           const base = prev ?? loadPresentState()
@@ -147,17 +164,22 @@ export default function BigScreen() {
         if (e.data?.type === 'TIMER_UPDATE') {
           setTimerState(prev => {
             const base = prev ?? loadState()
-            let remaining = e.data.state.remaining ?? base.remaining
-            
-            // Apply timestamp-based interpolation for smooth countdown
+
+            let authoritative = e.data.state.remaining ?? base.remaining
             if (e.data.state.syncedAt && e.data.state.running) {
               const elapsed = (Date.now() - e.data.state.syncedAt) / 1000
-              remaining = Math.max(0, remaining - Math.round(elapsed))
+              authoritative = Math.max(0, authoritative - Math.round(elapsed))
             }
-            
+
+            const runningChanged = e.data.state.running !== undefined && e.data.state.running !== base.running
+            const indexChanged   = e.data.state.currentIndex !== undefined && e.data.state.currentIndex !== base.currentIndex
+            const drift = Math.abs(base.remaining - authoritative)
+            const shouldSnap = runningChanged || indexChanged || drift > DRIFT_TOLERANCE_SECS
+
             return {
-              ...base, ...e.data.state,
-              remaining,
+              ...base,
+              ...e.data.state,
+              remaining: shouldSnap ? authoritative : base.remaining,
               activities: e.data.state.activities?.length
                 ? e.data.state.activities
                 : base.activities,
@@ -173,14 +195,17 @@ export default function BigScreen() {
     return () => { tbc?.close(); pbc?.close() }
   }, [])
 
-  // ── Fallback poll for sync ───────────────────────────────
-  useEffect(() => {
-    const id = setInterval(() => {
-      setTimerState(loadState())
-      setPresentState(loadPresentState())
-    }, 200)
-    return () => clearInterval(id)
-  }, [])
+  // ── ⛔ REMOVED: 200ms localStorage poll ───────────────────
+  // This was the root cause of jumpy countdowns on remote screens.
+  //
+  // On the control-panel device localStorage is always up-to-date, so
+  // the poll looked harmless locally. On a REMOTE screen localStorage
+  // is only updated when a Pusher message arrives (~every 2s), so the
+  // poll was reading stale values and snapping the display backwards
+  // every 200ms — producing the "9 8 8 7 6 2" skip pattern.
+  //
+  // The local tick + Pusher drift-correction is sufficient for smooth,
+  // accurate display on all devices.
 
   // ── Blink at ≤ 50s ────────────────────────────────────────
   useEffect(() => {
