@@ -83,23 +83,20 @@ export function saveAndBroadcast(state: TimerState): void {
     return
   }
 
-  // ── DRIFT CORRECTION every 15 seconds ────────────────────
-  // The screen runs its own local tick so we don't need to push every second.
-  // We just correct any accumulated drift every 15s.
-  // This drastically reduces Pusher message count.
-  const drift = _prev ? Math.abs(state.remaining - (_prev.remaining - (Date.now() % 15000) / 1000)) : 999
+  // ── SYNC every 2 seconds when running ────────────────────
+  // Send timer state every 2 seconds to keep all viewers in real-time sync.
+  // This ensures no lag between control panel and big screen displays.
   if (!_driftTimer) {
     _driftTimer = setTimeout(() => {
       _driftTimer = null
-      if (_prev) {
+      if (_prev && state.running) {
         _prev.remaining = state.remaining
         pushToServer('TIMER_UPDATE', buildPayload(state, false))
       }
-    }, 15000)
+    }, 2000)
   }
 
   _prev = { ..._prev!, remaining: state.remaining }
-  void drift // suppress unused warning
 }
 
 export async function pushToServer(type: string, payload: unknown): Promise<void> {
