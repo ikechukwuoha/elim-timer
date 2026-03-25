@@ -5,9 +5,6 @@ export interface Activity {
   duration: number // minutes
 }
 
-// Add these two fields to your existing TimerState type.
-// Everything else in your types file stays the same.
-
 export type TimerState = {
   activities:       Activity[]
   currentIndex:     number
@@ -15,26 +12,26 @@ export type TimerState = {
   remaining:        number
   overtime:         boolean
   overtimeSeconds:  number
-  startedAt:        number | null   // ms epoch when timer last started/resumed
-  remainingAtStart: number | null   // seconds on clock at that exact moment
+  startedAt:        number | null
+  remainingAtStart: number | null
 }
 
 export type TimerColor = 'green' | 'yellow' | 'red'
 
 // ── Bible ────────────────────────────────────────────────────
 export interface BibleTranslation {
-  id: string       // e.g. "KJV"
-  name: string     // e.g. "King James Version"
-  language: string // e.g. "English"
+  id: string
+  name: string
+  language: string
 }
 
 export interface BibleVerse {
-  book: string      // e.g. "John"
+  book: string
   chapter: number
   verse: number
   text: string
   translation: string
-  reference: string // e.g. "John 3:16 (KJV)"
+  reference: string
 }
 
 export interface BibleChapter {
@@ -60,7 +57,29 @@ export interface Song {
 export interface SlideImage {
   id: number
   name: string
-  url: string // /uploads/filename or data URL
+  url: string
+}
+
+// ── Videos ───────────────────────────────────────────────────
+export interface SlideVideo {
+  id: number
+  name: string
+  url: string
+  type: 'video/mp4' | 'video/webm' | 'video/ogg' | string
+}
+
+// ── Presentations ────────────────────────────────────────────
+export interface SlidePresentation {
+  id: number
+  name: string
+  url: string
+  // PDF = rendered page-by-page via pdf.js
+  // PPTX = auto-converted to PDF on upload (server) or displayed via Google Slides iframe
+  type: 'application/pdf' | 'application/vnd.openxmlformats-officedocument.presentationml.presentation' | 'google-slides' | string
+  // For Google Slides embed links
+  embedUrl?: string
+  // Total pages (populated after upload/conversion)
+  pageCount?: number
 }
 
 // ── Notices ──────────────────────────────────────────────────
@@ -71,12 +90,14 @@ export interface Notice {
   style: 'default' | 'urgent' | 'celebration'
 }
 
-// ── Presentation State (shared between control + screen) ────
+// ── Presentation State ────────────────────────────────────────
 export type PresentMode =
   | 'timer'
   | 'bible'
   | 'song'
   | 'image'
+  | 'video'
+  | 'presentation'
   | 'notice'
   | 'blank'
 
@@ -95,9 +116,25 @@ export interface PresentState {
   images: SlideImage[]
   activeImageId: number | null
 
+  // Videos
+  videos: SlideVideo[]
+  activeVideoId: number | null
+
+  // Presentations
+  presentations: SlidePresentation[]
+  activePresentationId: number | null
+  activePresentationPage: number
+
   // Notices
   notices: Notice[]
   activeNoticeId: number | null
+
+  // Alert scroller
+  alertActive: boolean
+  alertMinisters: string[]
+  alertPosition: 'top' | 'bottom'
+  alertRepeats: number
+  alertIntervalMs: number
 }
 
 // ── Broadcast ────────────────────────────────────────────────

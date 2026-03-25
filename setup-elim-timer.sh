@@ -831,11 +831,13 @@ export default function BigScreen() {
         fontSize: 11, color: 'rgba(255,255,255,0.22)', letterSpacing: '0.1em',
       }}>
         <span style={{
-          width: 7, height: 7, borderRadius: '50%', display: 'inline-block',
-          background: state.running ? '#22c55e' : '#444',
-          boxShadow: state.running ? '0 0 8px #22c55e' : 'none',
-          transition: 'background 0.4s',
-        }} />
+        width: '10px', height: '10px',   // ← strings, not numbers
+        borderRadius: '50%',
+        display: 'inline-block',
+        background:  timerState.running && isTm ? '#22c55e' : '#aaa',
+        boxShadow:   timerState.running && isTm ? '0 0 14px #22c55e' : 'none',
+        transition:  'background 0.4s',
+      }} suppressHydrationWarning />
         {state.running ? 'LIVE' : 'PAUSED'}
       </div>
 

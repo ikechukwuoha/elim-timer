@@ -8,6 +8,22 @@ interface Props {
 }
 
 export default function ImageView({ image }: Props) {
+  if (!image.url) {
+    return (
+      <div style={{
+        position: 'absolute',
+        inset: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: '#000',
+        color: 'white',
+      }}>
+        Image not available
+      </div>
+    )
+  }
+
   return (
     <div style={{
       position: 'absolute',
@@ -23,7 +39,7 @@ export default function ImageView({ image }: Props) {
         fill
         style={{ objectFit: 'contain' }}
         priority
-        unoptimized={image.url.startsWith('data:')}
+        unoptimized={image.url?.startsWith('data:') ?? false}
       />
       {/* Image name bottom */}
       <p style={{

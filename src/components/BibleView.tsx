@@ -37,7 +37,7 @@ export default function BibleView({ verse, glowColor, timerColor }: Props) {
       <p style={{
         fontFamily: 'var(--font-cinzel), serif',
         fontSize: 'clamp(22px, 4vw, 52px)',
-        fontWeight: 400,
+        fontWeight: 700,
         color: '#ffffff',
         lineHeight: 1.55,
         letterSpacing: '0.03em',

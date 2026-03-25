@@ -1,47 +1,29 @@
-import type { PresentState, PresentMode, BibleVerse, Song, SlideImage, Notice } from '@/types'
-import { pushToServer } from '@/utils/timerStore'
+// utils/presentStore.ts
+import type { PresentState, PresentMode, BibleVerse, Song, SlideImage, SlideVideo, SlidePresentation, Notice } from '@/types'
 
 export const PRESENT_STORAGE_KEY  = 'elim_present_state'
 export const PRESENT_CHANNEL_NAME = 'elim_present_channel'
 
-const DEFAULT_SONGS: Song[] = [
-  {
-    id: 1, title: 'Amazing Grace', artist: 'John Newton',
-    lines: [
-      { id: 1, text: 'Amazing grace! How sweet the sound' },
-      { id: 2, text: 'That saved a wretch like me' },
-      { id: 3, text: 'I once was lost, but now am found' },
-      { id: 4, text: 'Was blind, but now I see' },
-      { id: 5, text: "'Twas grace that taught my heart to fear" },
-      { id: 6, text: 'And grace my fears relieved' },
-      { id: 7, text: 'How precious did that grace appear' },
-      { id: 8, text: 'The hour I first believed' },
-    ],
-  },
-  {
-    id: 2, title: 'What a Friend We Have in Jesus', artist: 'Joseph M. Scriven',
-    lines: [
-      { id: 1, text: 'What a friend we have in Jesus' },
-      { id: 2, text: 'All our sins and griefs to bear' },
-      { id: 3, text: 'What a privilege to carry' },
-      { id: 4, text: 'Everything to God in prayer' },
-      { id: 5, text: 'Oh, what peace we often forfeit' },
-      { id: 6, text: 'Oh, what needless pain we bear' },
-      { id: 7, text: 'All because we do not carry' },
-      { id: 8, text: 'Everything to God in prayer' },
-    ],
-  },
-]
-
-const DEFAULT_NOTICES: Notice[] = [
-  { id: 1, title: 'Welcome', body: 'Welcome to Elim Christian Garden International.\nWe are glad you are here today.', style: 'default' },
-]
-
 export const DEFAULT_PRESENT_STATE: PresentState = {
-  mode: 'timer', activeVerse: null,
-  songs: DEFAULT_SONGS, activeSongId: null, activeLineIndex: 0,
-  images: [], activeImageId: null,
-  notices: DEFAULT_NOTICES, activeNoticeId: null,
+  mode: 'timer',
+  activeVerse: null,
+  songs: [],
+  activeSongId: null,
+  activeLineIndex: 0,
+  images: [],
+  activeImageId: null,
+  videos: [],
+  activeVideoId: null,
+  presentations: [],
+  activePresentationId: null,
+  notices: [],
+  activeNoticeId: null,
+  alertActive: false,
+  alertMinisters: [],
+  alertPosition: 'bottom',
+  alertRepeats: 1,
+  alertIntervalMs: 2500,
+  activePresentationPage: 0
 }
 
 export function loadPresentState(): PresentState {
@@ -50,83 +32,75 @@ export function loadPresentState(): PresentState {
     const raw = localStorage.getItem(PRESENT_STORAGE_KEY)
     if (!raw) return DEFAULT_PRESENT_STATE
     const parsed = JSON.parse(raw) as PresentState
-    if (!parsed.songs?.length)   parsed.songs   = DEFAULT_SONGS
-    if (!parsed.notices?.length) parsed.notices = DEFAULT_NOTICES
-    return parsed
+    return {
+      ...DEFAULT_PRESENT_STATE,
+      ...parsed,
+      songs:               Array.isArray(parsed.songs) ? parsed.songs : [],
+      notices:             Array.isArray(parsed.notices) ? parsed.notices : [],
+      images:              Array.isArray(parsed.images) ? parsed.images : [],
+      videos:              Array.isArray(parsed.videos) ? parsed.videos : [],
+      presentations:       Array.isArray(parsed.presentations) ? parsed.presentations : [],
+      alertActive:         typeof parsed.alertActive === 'boolean' ? parsed.alertActive : DEFAULT_PRESENT_STATE.alertActive,
+      alertMinisters:      Array.isArray(parsed.alertMinisters) ? parsed.alertMinisters : DEFAULT_PRESENT_STATE.alertMinisters,
+      alertPosition:       parsed.alertPosition === 'top' || parsed.alertPosition === 'bottom' ? parsed.alertPosition : DEFAULT_PRESENT_STATE.alertPosition,
+      alertRepeats:        typeof parsed.alertRepeats === 'number' ? parsed.alertRepeats : DEFAULT_PRESENT_STATE.alertRepeats,
+      alertIntervalMs:     typeof parsed.alertIntervalMs === 'number' ? parsed.alertIntervalMs : DEFAULT_PRESENT_STATE.alertIntervalMs,
+    }
   } catch {
     return DEFAULT_PRESENT_STATE
   }
 }
 
-// ── Slim present payload — strips base64 image data ──────────
-// Images are stored in localStorage on the screen device
-// We only send the image ID and name over Pusher, not the data URL
-interface SlimPresentPayload {
-  mode:            PresentMode
-  activeVerse:     BibleVerse | null
-  activeSongId:    number | null
-  activeLineIndex: number
-  activeImageId:   number | null
-  activeNoticeId:  number | null
-  // Metadata only — no base64 urls
-  songs:    { id: number; title: string; artist?: string; lines: { id: number; text: string }[] }[]
-  images:   { id: number; name: string }[]   // ← no url field
-  notices:  Notice[]
+// ── Slim payload — strips base64 URLs for HTTP transport ──────
+function toSlimPayload(state: PresentState) {
+  return {
+    mode:                 state.mode,
+    activeVerse:          state.activeVerse,
+    activeSongId:         state.activeSongId,
+    activeLineIndex:      state.activeLineIndex,
+    activeImageId:        state.activeImageId,
+    activeVideoId:        state.activeVideoId,
+    activePresentationId: state.activePresentationId,
+    activeNoticeId:       state.activeNoticeId,
+    songs:                state.songs,
+    notices:              state.notices,
+    images:               state.images.map(img => ({ id: img.id, name: img.name })),
+    videos:               state.videos.map(v => ({ id: v.id, name: v.name, type: v.type })),
+    presentations:        state.presentations.map(p => ({ id: p.id, name: p.name, type: p.type })),
+    alertActive:          state.alertActive,
+    alertMinisters:       state.alertMinisters,
+    alertPosition:        state.alertPosition,
+    alertRepeats:         state.alertRepeats,
+    alertIntervalMs:      state.alertIntervalMs,
+  }
 }
 
-function toSlimPayload(state: PresentState): SlimPresentPayload {
-  return {
-    mode:            state.mode,
-    activeVerse:     state.activeVerse,
-    activeSongId:    state.activeSongId,
-    activeLineIndex: state.activeLineIndex,
-    activeImageId:   state.activeImageId,
-    activeNoticeId:  state.activeNoticeId,
-    songs:           state.songs,
-    images:          state.images.map(img => ({ id: img.id, name: img.name })), // strip url
-    notices:         state.notices,
-  }
+function shouldLogPresentSyncError(): boolean {
+  if (typeof window === 'undefined') return false
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return false
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false
+  return true
 }
 
 export function savePresentState(state: PresentState): void {
   if (typeof window === 'undefined') return
-
-  // Save full state (including image data URLs) to localStorage
   localStorage.setItem(PRESENT_STORAGE_KEY, JSON.stringify(state))
-
-  // Same-browser tab sync — full state fine here
   try {
     const bc = new BroadcastChannel(PRESENT_CHANNEL_NAME)
     bc.postMessage({ type: 'PRESENT_UPDATE', state })
     bc.close()
   } catch { /* unavailable */ }
-
-  // Cross-device — send slim payload (no base64 images)
-  const slim = toSlimPayload(state)
-  const body = JSON.stringify({ type: 'PRESENT_UPDATE', state: slim })
-
-  if (body.length > 9000) {
-    console.warn(`Present payload still large (${body.length} bytes) — songs may be too long`)
-    // Try sending just the essential mode/verse/line info
-    const minimal = {
-      mode:            state.mode,
-      activeVerse:     state.activeVerse,
-      activeSongId:    state.activeSongId,
-      activeLineIndex: state.activeLineIndex,
-      activeImageId:   state.activeImageId,
-      activeNoticeId:  state.activeNoticeId,
-      songs:           state.songs,
-      images:          state.images.map(img => ({ id: img.id, name: img.name })),
-      notices:         state.notices,
-    }
-    pushToServer('PRESENT_UPDATE', minimal)
-    return
-  }
-
-  pushToServer('PRESENT_UPDATE', slim)
+  fetch('/api/present', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state: toSlimPayload(state) }),
+    keepalive: true,
+  }).catch(e => {
+    if (shouldLogPresentSyncError()) console.warn('[API] Save present error:', e.message)
+  })
 }
 
-// ── Helpers ───────────────────────────────────────────────────
+// ── State helpers ─────────────────────────────────────────────
 
 export function setMode(state: PresentState, mode: PresentMode): PresentState {
   return { ...state, mode }
@@ -149,21 +123,69 @@ export function displayImage(state: PresentState, imageId: number): PresentState
 export function displayNotice(state: PresentState, noticeId: number): PresentState {
   return { ...state, mode: 'notice', activeNoticeId: noticeId }
 }
+
+// ── Video helpers ─────────────────────────────────────────────
+export function displayVideo(state: PresentState, videoId: number): PresentState {
+  return { ...state, mode: 'video', activeVideoId: videoId }
+}
+export function addVideo(state: PresentState, video: Omit<SlideVideo, 'id'>): PresentState {
+  return { ...state, videos: [...state.videos, { ...video, id: Date.now() }] }
+}
+export function deleteVideo(state: PresentState, videoId: number): PresentState {
+  return {
+    ...state,
+    videos:       state.videos.filter(v => v.id !== videoId),
+    activeVideoId: state.activeVideoId === videoId ? null : state.activeVideoId,
+  }
+}
+
+// ── Presentation helpers ──────────────────────────────────────
+export function displayPresentation(state: PresentState, presentationId: number): PresentState {
+  return { ...state, mode: 'presentation', activePresentationId: presentationId }
+}
+export function addPresentation(state: PresentState, presentation: Omit<SlidePresentation, 'id'>): PresentState {
+  return { ...state, presentations: [...state.presentations, { ...presentation, id: Date.now() }] }
+}
+export function deletePresentation(state: PresentState, presentationId: number): PresentState {
+  return {
+    ...state,
+    presentations:        state.presentations.filter(p => p.id !== presentationId),
+    activePresentationId: state.activePresentationId === presentationId ? null : state.activePresentationId,
+  }
+}
+
+// ── Song helpers ──────────────────────────────────────────────
 export function addSong(state: PresentState, song: Omit<Song, 'id'>): PresentState {
   return { ...state, songs: [...state.songs, { ...song, id: Date.now() }] }
 }
 export function deleteSong(state: PresentState, songId: number): PresentState {
-  return { ...state, songs: state.songs.filter(s => s.id !== songId), activeSongId: state.activeSongId === songId ? null : state.activeSongId }
+  return {
+    ...state,
+    songs:        state.songs.filter(s => s.id !== songId),
+    activeSongId: state.activeSongId === songId ? null : state.activeSongId,
+  }
 }
+
+// ── Image helpers ─────────────────────────────────────────────
 export function addImage(state: PresentState, image: Omit<SlideImage, 'id'>): PresentState {
   return { ...state, images: [...state.images, { ...image, id: Date.now() }] }
 }
 export function deleteImage(state: PresentState, imageId: number): PresentState {
-  return { ...state, images: state.images.filter(i => i.id !== imageId), activeImageId: state.activeImageId === imageId ? null : state.activeImageId }
+  return {
+    ...state,
+    images:        state.images.filter(i => i.id !== imageId),
+    activeImageId: state.activeImageId === imageId ? null : state.activeImageId,
+  }
 }
+
+// ── Notice helpers ────────────────────────────────────────────
 export function addNotice(state: PresentState, notice: Omit<Notice, 'id'>): PresentState {
   return { ...state, notices: [...state.notices, { ...notice, id: Date.now() }] }
 }
 export function deleteNotice(state: PresentState, noticeId: number): PresentState {
-  return { ...state, notices: state.notices.filter(n => n.id !== noticeId), activeNoticeId: state.activeNoticeId === noticeId ? null : state.activeNoticeId }
+  return {
+    ...state,
+    notices:        state.notices.filter(n => n.id !== noticeId),
+    activeNoticeId: state.activeNoticeId === noticeId ? null : state.activeNoticeId,
+  }
 }
