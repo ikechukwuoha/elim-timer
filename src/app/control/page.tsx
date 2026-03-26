@@ -21,7 +21,7 @@ import {
   addPresentation, deletePresentation, displayPresentation,
 } from '@/utils/presentStore'
 import {
-  fetchTranslations, fetchBooks, fetchChapter,
+  fetchTranslations, fetchBooks, fetchChapter, fetchVerse,
   PRESET_TRANSLATIONS, BOOK_ID_MAP, STANDARD_BOOKS,
 } from '@/utils/bibleApi'
 import type { BibleTranslation, BibleBook } from '@/utils/bibleApi'
@@ -72,7 +72,16 @@ function levenshtein(a: string, b: string, maxDist = 3): number {
   return dp[n]
 }
 
+function normalizeSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gi, ' ')
+    .trim()
+    .replace(/\s+/g, ' ')
+}
+
 function wordMatches(queryWord: string, verseWord: string): boolean {
+  if (queryWord.length <= 3) return verseWord === queryWord
   if (verseWord.includes(queryWord)) return true
   if (queryWord.length >= 4) {
     const maxDist = queryWord.length <= 6 ? 1 : 2
@@ -81,34 +90,76 @@ function wordMatches(queryWord: string, verseWord: string): boolean {
   return false
 }
 
-function scoreVerse(verseText: string, queryTerms: string[]): { matched: boolean; score: number; matchedTerms: string[] } {
+function scoreVerse(
+  verseText: string,
+  queryTerms: string[],
+  phraseQuery?: string | null
+): { matched: boolean; score: number; matchedTerms: string[] } {
   const lowerText = verseText.toLowerCase()
-  const verseWords = lowerText.split(/\W+/).filter(Boolean)
+  const normalizedText = normalizeSearchText(verseText)
+  const verseWords = normalizedText.split(' ').filter(Boolean)
   const matchedTerms: string[] = []
+  const matchedWordTerms = new Set<string>()
   let score = 0
+
+  const hasPhraseQuery = Boolean(phraseQuery && phraseQuery.length >= 3)
+  const hasExactPhrase = Boolean(phraseQuery && normalizedText.includes(phraseQuery))
+
+  if (hasExactPhrase && phraseQuery) {
+    matchedTerms.push(phraseQuery)
+    score += 120
+  }
+
   for (const term of queryTerms) {
-    if (lowerText.includes(term)) { matchedTerms.push(term); score += 10; continue }
+    if (lowerText.includes(term)) {
+      matchedWordTerms.add(term)
+      if (!matchedTerms.includes(term)) matchedTerms.push(term)
+      score += 12
+      continue
+    }
     let termMatched = false
     for (const vw of verseWords) {
       if (wordMatches(term, vw)) {
         termMatched = true
-        score += vw === term ? 8 : vw.includes(term) ? 6 : 3
+        matchedWordTerms.add(term)
+        score += vw === term ? 10 : vw.includes(term) ? 7 : 4
         break
       }
     }
     if (termMatched && !matchedTerms.includes(term)) matchedTerms.push(term)
   }
-  return { matched: matchedTerms.length > 0, score, matchedTerms }
+
+  const allTermsMatched = queryTerms.every(term => matchedWordTerms.has(term))
+  const orderedPhraseMatch =
+    queryTerms.length > 1 &&
+    queryTerms.every((term, index) => {
+      if (index === 0) return normalizedText.includes(term)
+      const previousTerm = queryTerms[index - 1]
+      const previousIndex = normalizedText.indexOf(previousTerm)
+      const currentIndex = normalizedText.indexOf(term, previousIndex + previousTerm.length)
+      return currentIndex >= 0
+    })
+
+  if (queryTerms.length > 1) {
+    if (!allTermsMatched && !hasExactPhrase) {
+      return { matched: false, score: 0, matchedTerms: [] }
+    }
+    if (allTermsMatched) score += 36
+    if (orderedPhraseMatch) score += 22
+  }
+
+  return { matched: hasExactPhrase || allTermsMatched || matchedTerms.length > 0, score, matchedTerms }
 }
 
 function highlightTerms(text: string, terms: string[]): { text: string; highlight: boolean }[] {
   if (!terms.length) return [{ text, highlight: false }]
-  const escaped = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const orderedTerms = Array.from(new Set(terms.filter(Boolean))).sort((a, b) => b.length - a.length)
+  const escaped = orderedTerms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
   const pattern = new RegExp(`(${escaped.join('|')})`, 'gi')
   const parts = text.split(pattern)
   return parts.map(part => ({
     text: part,
-    highlight: terms.some(t => part.toLowerCase().includes(t.toLowerCase()) && t.length >= 2),
+    highlight: orderedTerms.some(t => part.toLowerCase().includes(t.toLowerCase()) && t.length >= 2),
   }))
 }
 
@@ -124,7 +175,11 @@ export default function ControlPanel() {
   const [activeTab, setActiveTab] = useState<Tab>('timer')
   const [timerState, setTimerState] = useState<TimerState>(DEFAULT_STATE)
   const [presentState, setPresentState] = useState<PresentState>(DEFAULT_PRESENT_STATE)
-  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editingDurationId, setEditingDurationId] = useState<number | null>(null)
+  const [editingNameId, setEditingNameId] = useState<number | null>(null)
+  const [editingNameValue, setEditingNameValue] = useState('')
+  const [draggedActivityId, setDraggedActivityId] = useState<number | null>(null)
+  const [dragOverActivityId, setDragOverActivityId] = useState<number | null>(null)
   const [newActName, setNewActName] = useState('')
   const [newActDur, setNewActDur] = useState(15)
 
@@ -158,6 +213,7 @@ export default function ControlPanel() {
   const [quickRef, setQuickRef] = useState('')
   const [quickRefError, setQuickRefError] = useState('')
   const bibleSearchTokenRef = useRef(0)
+  const translationSyncTokenRef = useRef(0)
   const chapterCacheRef = useRef<Map<string, { verse: number; text: string }[]>>(new Map())
 
   // Operator notes
@@ -194,10 +250,12 @@ export default function ControlPanel() {
   // ── Hydrate ───────────────────────────────────────────────
   useEffect(() => {
     const ts = loadState()
+    const ps = loadPresentState()
     setTimerState(ts)
     timerStateRef.current = ts
     setDisplayRemaining(Math.floor(computeRemaining(ts)))
-    setPresentState(loadPresentState())
+    setPresentState(ps)
+    if (ps.activeVerse?.translation) setSelectedTranslation(ps.activeVerse.translation)
     try { setOperatorNotes(localStorage.getItem('elim_op_notes') ?? '') } catch {}
     return () => {}
   }, [])
@@ -299,8 +357,15 @@ export default function ControlPanel() {
     fetchBooks(selectedTranslation).then(b => {
       setBooks(b)
       if (b.length > 0) {
-        const john = b.find(bk => bk.name === 'John') ?? b[0]
-        setSelectedBook(john.name); setSelectedBookId(String(john.bookid))
+        const preferredBookName =
+          (presentState.mode === 'bible' ? presentState.activeVerse?.book : null) ?? selectedBook
+        const preferredBook =
+          b.find(bk => String(bk.bookid) === selectedBookId) ??
+          b.find(bk => bk.name === preferredBookName) ??
+          b.find(bk => bk.name === 'John') ??
+          b[0]
+        setSelectedBook(preferredBook.name)
+        setSelectedBookId(String(preferredBook.bookid))
       }
     })
   }, [selectedTranslation])
@@ -330,6 +395,52 @@ export default function ControlPanel() {
   const updatePresent = useCallback((updater: (prev: PresentState) => PresentState) => {
     setPresentState(prev => { const next = updater(prev); savePresentState(next); return next })
   }, [])
+
+  const handleTranslationSelect = async (nextTranslation: string) => {
+    setSelectedTranslation(nextTranslation)
+    setTranslationSearch('')
+    setShowTranslationList(false)
+
+    const activeVerse = presentState.mode === 'bible' ? presentState.activeVerse : null
+    if (!activeVerse || activeVerse.translation === nextTranslation) return
+
+    const bookId =
+      BOOK_ID_MAP[activeVerse.book] ??
+      String(books.find(book => book.name === activeVerse.book)?.bookid ?? '')
+
+    if (!bookId) return
+
+    setSelectedBook(activeVerse.book)
+    setSelectedBookId(String(bookId))
+    setSelectedChapter(activeVerse.chapter)
+    setChapterInput(String(activeVerse.chapter))
+
+    const syncToken = Date.now()
+    translationSyncTokenRef.current = syncToken
+
+    const nextVerse = await fetchVerse(
+      nextTranslation,
+      String(bookId),
+      activeVerse.book,
+      activeVerse.chapter,
+      activeVerse.verse
+    )
+
+    if (!nextVerse || translationSyncTokenRef.current !== syncToken) return
+
+    updatePresent(prev => {
+      const currentVerse = prev.activeVerse
+      if (prev.mode !== 'bible' || !currentVerse) return prev
+      if (
+        currentVerse.book !== activeVerse.book ||
+        currentVerse.chapter !== activeVerse.chapter ||
+        currentVerse.verse !== activeVerse.verse
+      ) {
+        return prev
+      }
+      return displayVerse(prev, nextVerse)
+    })
+  }
 
   // ── Timer actions ─────────────────────────────────────────
   const startPause = () => {
@@ -367,13 +478,56 @@ export default function ControlPanel() {
     updateTimer(p => ({ ...p, activities: [...p.activities, { id: generateId(), name: newActName.trim(), duration: newActDur }] }))
     setNewActName(''); setNewActDur(15)
   }
-  const removeActivity = (id: number) => updateTimer(p => {
-    const filtered = p.activities.filter(a => a.id !== id)
-    if (!filtered.length) return p
-    const newIdx = Math.min(p.currentIndex, filtered.length - 1)
-    const remaining = filtered[newIdx].duration * 60
-    return withPauseAnchor({ ...p, activities: filtered, currentIndex: newIdx, overtime: false, overtimeSeconds: 0 }, remaining)
-  })
+  const removeActivity = (id: number) => {
+    if (editingDurationId === id) setEditingDurationId(null)
+    if (editingNameId === id) cancelRenameActivity()
+    updateTimer(p => {
+      const filtered = p.activities.filter(a => a.id !== id)
+      if (!filtered.length) return p
+      const newIdx = Math.min(p.currentIndex, filtered.length - 1)
+      const remaining = filtered[newIdx].duration * 60
+      return withPauseAnchor({ ...p, activities: filtered, currentIndex: newIdx, overtime: false, overtimeSeconds: 0 }, remaining)
+    })
+  }
+  const updateActivityName = (id: number, name: string) => updateTimer(p => ({
+    ...p,
+    activities: p.activities.map((a): Activity => (a.id === id ? { ...a, name } : a)),
+  }))
+  const beginRenameActivity = (activity: Activity) => {
+    setEditingDurationId(null)
+    setEditingNameId(activity.id)
+    setEditingNameValue(activity.name)
+  }
+  const cancelRenameActivity = () => {
+    setEditingNameId(null)
+    setEditingNameValue('')
+  }
+  const commitRenameActivity = (id: number) => {
+    const nextName = editingNameValue.trim()
+    const currentName = timerState.activities.find(activity => activity.id === id)?.name ?? ''
+    if (nextName && nextName !== currentName) updateActivityName(id, nextName)
+    cancelRenameActivity()
+  }
+  const reorderActivities = (fromId: number, toId: number) => {
+    if (fromId === toId) return
+    updateTimer(p => {
+      const fromIndex = p.activities.findIndex(activity => activity.id === fromId)
+      const toIndex = p.activities.findIndex(activity => activity.id === toId)
+      if (fromIndex === -1 || toIndex === -1 || fromIndex === toIndex) return p
+
+      const activities = [...p.activities]
+      const [movedActivity] = activities.splice(fromIndex, 1)
+      activities.splice(toIndex, 0, movedActivity)
+
+      const activeActivityId = p.activities[p.currentIndex]?.id
+      const nextCurrentIndex =
+        activeActivityId == null
+          ? p.currentIndex
+          : Math.max(0, activities.findIndex(activity => activity.id === activeActivityId))
+
+      return { ...p, activities, currentIndex: nextCurrentIndex }
+    })
+  }
   const updateDuration = (id: number, duration: number) => {
     updateTimer(p => {
       const activities = p.activities.map((a): Activity => (a.id === id ? { ...a, duration } : a))
@@ -388,7 +542,7 @@ export default function ControlPanel() {
       const nextState = { ...p, activities, currentIndex: curIndex, remaining: newRemaining, overtime: newRemaining < 0, overtimeSeconds: Math.max(0, -newRemaining) }
       return p.running ? withStartAnchor(nextState, newRemaining) : withPauseAnchor(nextState, newRemaining)
     })
-    setEditingId(null)
+    setEditingDurationId(null)
   }
 
   // ── Bible helpers ─────────────────────────────────────────
@@ -408,7 +562,46 @@ export default function ControlPanel() {
     ? books.filter(b => b.name.toLowerCase().includes(bookSearch.toLowerCase()))
     : books
 
+  const selectedBookMeta = useMemo(
+    () =>
+      books.find(book => String(book.bookid) === selectedBookId || book.name === selectedBook)
+      ?? STANDARD_BOOKS.find(book => String(book.bookid) === selectedBookId || book.name === selectedBook)
+      ?? null,
+    [books, selectedBook, selectedBookId]
+  )
+  const maxChapterCount = Math.max(1, selectedBookMeta?.chapters ?? selectedChapter)
+  const canGoPrevChapter = selectedChapter > 1
+  const canGoNextChapter = selectedChapter < maxChapterCount
   const chapterViewVerses = useMemo(() => chapterVerses, [chapterVerses])
+  const activeVerseNumber =
+    presentState.activeVerse?.book === selectedBook && presentState.activeVerse?.chapter === selectedChapter
+      ? presentState.activeVerse.verse
+      : null
+  const activeVerseIndex =
+    activeVerseNumber == null
+      ? -1
+      : chapterViewVerses.findIndex(verse => verse.verse === activeVerseNumber)
+  const canGoPrevVerse = activeVerseIndex > 0
+  const canGoNextVerse = activeVerseIndex >= 0 && activeVerseIndex < chapterViewVerses.length - 1
+
+  const jumpToChapter = (chapter: number) => {
+    const nextChapter = Math.min(maxChapterCount, Math.max(1, chapter))
+    setSelectedChapter(nextChapter)
+    setChapterInput(String(nextChapter))
+  }
+  const jumpToVerse = (delta: number) => {
+    if (activeVerseIndex < 0) return
+    const targetVerse = chapterViewVerses[activeVerseIndex + delta]
+    if (!targetVerse) return
+    displayVerseOnScreen({
+      book: selectedBook,
+      chapter: selectedChapter,
+      verse: targetVerse.verse,
+      text: targetVerse.text,
+      translation: selectedTranslation,
+      reference: `${selectedBook} ${selectedChapter}:${targetVerse.verse} (${selectedTranslation})`,
+    })
+  }
 
   const handleQuickRef = async () => {
     const raw = quickRef.trim()
@@ -443,7 +636,9 @@ export default function ControlPanel() {
   const runKeywordSearch = async () => {
     const raw = keywordSearch.trim()
     if (!raw) { setKeywordResults([]); setKeywordSearchError(''); return }
-    const queryTerms = raw.toLowerCase().split(/\s+/).filter(t => t.length >= 2)
+    const normalizedQuery = normalizeSearchText(raw)
+    const queryTerms = normalizedQuery.split(' ').filter(t => t.length >= 2)
+    const phraseQuery = queryTerms.length > 1 ? normalizedQuery : null
     if (!queryTerms.length) { setKeywordSearchError('Please enter at least one word to search'); return }
     const token = Date.now()
     bibleSearchTokenRef.current = token
@@ -465,13 +660,13 @@ export default function ControlPanel() {
             chapterCacheRef.current.set(cacheKey, verses)
           }
           for (const v of verses) {
-            const { matched, score, matchedTerms } = scoreVerse(v.text, queryTerms)
+            const { matched, score, matchedTerms } = scoreVerse(v.text, queryTerms, phraseQuery)
             if (matched) hits.push({ book: book.name, bookId: String(book.bookid), chapter, verse: v.verse, text: v.text, translation: selectedTranslation, reference: `${book.name} ${chapter}:${v.verse} (${selectedTranslation})`, score, matchedTerms })
-            if (hits.length >= KEYWORD_SEARCH_MAX_RESULTS * 3) break
+            if (!phraseQuery && hits.length >= KEYWORD_SEARCH_MAX_RESULTS * 3) break
           }
-          if (hits.length >= KEYWORD_SEARCH_MAX_RESULTS * 3) break
+          if (!phraseQuery && hits.length >= KEYWORD_SEARCH_MAX_RESULTS * 3) break
         }
-        if (hits.length >= KEYWORD_SEARCH_MAX_RESULTS * 3) break
+        if (!phraseQuery && hits.length >= KEYWORD_SEARCH_MAX_RESULTS * 3) break
       }
       if (bibleSearchTokenRef.current !== token) return
       hits.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
@@ -607,6 +802,12 @@ export default function ControlPanel() {
 
   const goBlank = () => updatePresent(p => setMode(p, 'blank'))
   const goTimerMode = () => updatePresent(p => setMode(p, 'timer'))
+  const logoutControl = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' })
+    } catch {}
+    window.location.assign('/login?logged_out=1')
+  }
 
   // ── Computed ──────────────────────────────────────────────
   const current = timerState.activities[timerState.currentIndex] ?? { name: 'No Activity', duration: 0 }
@@ -623,16 +824,19 @@ export default function ControlPanel() {
   const sessionRemainingMins = Math.max(0, totalMins - elapsedMins)
 
   const TAB_DEF: { id: Tab; label: string }[] = [
-    { id: 'timer', label: '⏱ Timer' },
-    { id: 'bible', label: '✝ Bible' },
-    { id: 'songs', label: '♪ Songs' },
-    { id: 'images', label: '🖼 Images' },
-    { id: 'media', label: '🎬 Media' },
-    { id: 'notices', label: '📢 Notices' },
+    { id: 'timer', label: 'Timer' },
+    { id: 'bible', label: 'Bible' },
+    { id: 'songs', label: 'Songs' },
+    { id: 'images', label: 'Images' },
+    { id: 'media', label: 'Media' },
+    { id: 'notices', label: 'Notices' },
   ]
 
   return (
     <div style={s.page}>
+      <div style={s.pageGlowPrimary} />
+      <div style={s.pageGlowSecondary} />
+      <div style={s.pageGrid} />
       {/* ── Header ── */}
       <header style={s.header}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -641,33 +845,40 @@ export default function ControlPanel() {
           </div>
           <div>
             <p style={s.churchName}>{CHURCH_NAME}</p>
-            <p style={s.subtitle}>Presentation Control Panel</p>
+            <p style={s.subtitle}>Presentation Control</p>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: wsConnected ? '#4ade80' : '#fbbf24', letterSpacing: '0.08em', background: wsConnected ? 'rgba(34,197,94,0.08)' : 'rgba(251,191,36,0.08)', border: `1px solid ${wsConnected ? 'rgba(34,197,94,0.2)' : 'rgba(251,191,36,0.2)'}`, borderRadius: 20, padding: '5px 12px' }}>
             <span style={{ width: 7, height: 7, borderRadius: '50%', display: 'inline-block', background: wsConnected ? '#4ade80' : '#fbbf24', boxShadow: wsConnected ? '0 0 6px #4ade80' : '0 0 6px #fbbf24' }} />
-            {wsConnected ? 'Live' : 'Connecting…'}
+            {wsConnected ? 'Connected' : 'Connecting…'}
           </div>
-          <button onClick={goBlank} style={s.headerBtnNeutral}>⬛ Blank</button>
-          <button onClick={goTimerMode} style={s.headerBtnGreen}>↩ Show Timer</button>
+          <button onClick={goBlank} style={s.headerBtnNeutral}>Blank Screen</button>
+          <button onClick={goTimerMode} style={s.headerBtnGreen}>Show Timer</button>
           <button onClick={() => window.open('/screen', '_blank', `width=${screen.width},height=${screen.height},left=0,top=0`)} style={s.bigScreenBtn}>
-            📺 Open Big Screen
+            Open Big Screen
           </button>
+          <button onClick={() => void logoutControl()} style={s.headerBtnDanger}>Logout</button>
         </div>
       </header>
 
       {/* ── Tab bar ── */}
       <div style={s.tabBar}>
         {TAB_DEF.map(t => (
-          <button key={t.id} onClick={() => setActiveTab(t.id)} style={{ ...s.tab, borderBottom: activeTab === t.id ? '2px solid #22c55e' : '2px solid transparent', color: activeTab === t.id ? '#e2e8f0' : '#64748b', background: activeTab === t.id ? 'rgba(34,197,94,0.05)' : 'transparent' }}>
+          <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
+            ...s.tab,
+            color: activeTab === t.id ? '#f8fafc' : '#8da2bd',
+            background: activeTab === t.id ? 'linear-gradient(180deg,rgba(14,165,233,0.18),rgba(13,148,136,0.12))' : 'rgba(255,255,255,0.02)',
+            borderColor: activeTab === t.id ? 'rgba(103,232,249,0.35)' : 'rgba(148,163,184,0.08)',
+            boxShadow: activeTab === t.id ? '0 12px 24px rgba(6,182,212,0.12), inset 0 1px 0 rgba(255,255,255,0.06)' : 'none',
+          }}>
             {t.label}
           </button>
         ))}
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, paddingRight: 16 }}>
-          <span style={{ fontSize: 11, color: '#475569', letterSpacing: '0.1em', textTransform: 'uppercase' }}>On screen:</span>
-          <span style={{ fontSize: 12, fontWeight: 700, padding: '5px 16px', borderRadius: 20, letterSpacing: '0.1em', background: presentState.mode === 'timer' ? 'rgba(34,197,94,0.12)' : presentState.mode === 'blank' ? 'rgba(100,116,139,0.12)' : 'rgba(59,130,246,0.12)', color: presentState.mode === 'timer' ? '#4ade80' : presentState.mode === 'blank' ? '#64748b' : '#93c5fd', border: `1px solid ${presentState.mode === 'timer' ? 'rgba(34,197,94,0.25)' : presentState.mode === 'blank' ? 'rgba(100,116,139,0.25)' : 'rgba(59,130,246,0.25)'}`, textTransform: 'uppercase' }}>
-            {presentState.mode === 'timer' ? '● ' : presentState.mode === 'blank' ? '' : '▶ '}{presentState.mode.toUpperCase()}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, paddingRight: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10, color: '#7c8aa3', letterSpacing: '0.18em', textTransform: 'uppercase', fontWeight: 700 }}>On Screen</span>
+          <span style={{ fontSize: 11, fontWeight: 800, padding: '8px 14px', borderRadius: 999, letterSpacing: '0.16em', background: presentState.mode === 'timer' ? 'rgba(34,197,94,0.12)' : presentState.mode === 'blank' ? 'rgba(100,116,139,0.12)' : 'rgba(56,189,248,0.12)', color: presentState.mode === 'timer' ? '#86efac' : presentState.mode === 'blank' ? '#94a3b8' : '#7dd3fc', border: `1px solid ${presentState.mode === 'timer' ? 'rgba(34,197,94,0.24)' : presentState.mode === 'blank' ? 'rgba(148,163,184,0.18)' : 'rgba(56,189,248,0.24)'}`, textTransform: 'uppercase', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.05)' }}>
+            {presentState.mode === 'timer' ? 'Live Timer' : presentState.mode === 'blank' ? 'Blank' : presentState.mode.toUpperCase()}
           </span>
         </div>
       </div>
@@ -718,7 +929,7 @@ export default function ControlPanel() {
 
             <main style={{ ...s.right, gap: 14 }}>
               {/* Hero ring card */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 20, background: '#141418', border: '1px solid #1e1e24', borderRadius: 14, padding: 20, flexShrink: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 20, background: 'linear-gradient(135deg,rgba(16,24,39,0.96),rgba(11,18,32,0.92))', border: '1px solid rgba(148,163,184,0.10)', borderRadius: 22, padding: 22, flexShrink: 0, boxShadow: '0 18px 36px rgba(0,0,0,0.22), inset 0 1px 0 rgba(255,255,255,0.03)' }}>
                 <div style={{ position: 'relative', width: 118, height: 118, flexShrink: 0 }}>
                   <svg width="118" height="118" viewBox="0 0 118 118" style={{ transform: 'rotate(-90deg)' }}>
                     <circle cx="59" cy="59" r="50" fill="none" strokeWidth="7" stroke="rgba(255,255,255,0.05)" />
@@ -744,7 +955,7 @@ export default function ControlPanel() {
               </div>
 
               {/* Session stats */}
-              <div style={{ background: '#141418', border: '1px solid #1e1e24', borderRadius: 12, padding: '16px 18px', flexShrink: 0 }}>
+              <div style={{ background: 'linear-gradient(180deg,rgba(13,19,31,0.94),rgba(8,12,21,0.92))', border: '1px solid rgba(148,163,184,0.08)', borderRadius: 18, padding: '18px 20px', flexShrink: 0, boxShadow: '0 16px 32px rgba(0,0,0,0.18)' }}>
                 <p style={{ ...s.sectionTitle, marginBottom: 12 }}>Session Overview</p>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 14 }}>
                   {([['Elapsed', `${elapsedMins}m`, '#64748b'], ['Remaining', `${sessionRemainingMins}m`, '#e2e8f0'], ['Items Done', `${timerState.currentIndex} / ${timerState.activities.length}`, '#94a3b8'], ['Total', `${totalMins}m`, '#475569']] as [string, string, string][]).map(([label, value, col]) => (
@@ -769,8 +980,9 @@ export default function ControlPanel() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, flex: 1, minHeight: 0 }}>
                 {/* Programme */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12 }}>
                     <p style={s.sectionTitle}>Programme</p>
+                    <span style={{ fontSize: 10, color: '#475569' }}>Drag to reorder. Edit names and durations anytime.</span>
                   </div>
 
                   {/* ── NEW ACTIVITY ROW — full width inputs ── */}
@@ -790,23 +1002,109 @@ export default function ControlPanel() {
                     >
                       {DURATION_OPTIONS.map(d => <option key={d} value={d}>{d}m</option>)}
                     </select>
-                    <button onClick={addActivity} style={{ ...s.addBtn, flexShrink: 0, padding: '8px 14px' }}>+</button>
+                    <button onClick={addActivity} style={{ ...s.addBtn, flexShrink: 0, padding: '10px 14px' }}>Add</button>
                   </div>
 
                   <div style={{ ...s.activityList, flex: 1, overflowY: 'auto' }}>
                     {timerState.activities.map((activity, index) => {
                       const isActive = index === timerState.currentIndex
                       const isPast = index < timerState.currentIndex
+                      const isDragTarget = dragOverActivityId === activity.id && draggedActivityId !== activity.id
+                      const isDragging = draggedActivityId === activity.id
                       return (
                         <div key={activity.id} role="button" tabIndex={0}
                           onClick={() => selectActivity(index)}
                           onKeyDown={e => e.key === 'Enter' && selectActivity(index)}
-                          style={{ ...s.activityRow, background: isActive ? 'linear-gradient(135deg,#1e3a2a,#172d20)' : isPast ? '#141414' : '#1c1c1e', borderColor: isActive ? '#166534' : '#252528', opacity: isPast ? 0.45 : 1, boxShadow: isActive ? `0 2px 12px ${theme.glow}` : 'none' }}>
+                          onDragOver={e => {
+                            e.preventDefault()
+                            if (draggedActivityId !== activity.id) setDragOverActivityId(activity.id)
+                          }}
+                          onDrop={e => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            if (draggedActivityId != null) reorderActivities(draggedActivityId, activity.id)
+                            setDraggedActivityId(null)
+                            setDragOverActivityId(null)
+                          }}
+                          style={{
+                            ...s.activityRow,
+                            background: isDragTarget
+                              ? 'linear-gradient(135deg,rgba(21,128,61,0.22),rgba(15,23,42,0.96))'
+                              : isActive
+                                ? 'linear-gradient(135deg,#1e3a2a,#172d20)'
+                                : isPast
+                                  ? '#141414'
+                                  : '#1c1c1e',
+                            borderColor: isDragTarget ? '#22c55e' : isActive ? '#166534' : '#252528',
+                            opacity: isDragging ? 0.55 : isPast ? 0.45 : 1,
+                            boxShadow: isDragTarget ? '0 0 0 1px rgba(34,197,94,0.2), 0 8px 20px rgba(34,197,94,0.12)' : isActive ? `0 2px 12px ${theme.glow}` : 'none',
+                            transform: isDragTarget ? 'translateY(-1px)' : 'none',
+                          }}>
                           <span style={{ ...s.indexBadge, background: isActive ? theme.text : isPast ? 'transparent' : '#252528', color: isActive ? '#000' : isPast ? '#334155' : '#4a4a55' }}>
                             {isPast ? '✓' : isActive ? '▶' : index + 1}
                           </span>
-                          <span style={{ flex: 1, fontSize: 13, fontWeight: 500, color: isActive ? '#fff' : '#a1a1aa' }}>{activity.name}</span>
-                          {editingId === activity.id ? (
+
+                          <button
+                            draggable
+                            onClick={e => e.stopPropagation()}
+                            onDragStart={e => {
+                              e.stopPropagation()
+                              setDraggedActivityId(activity.id)
+                              setDragOverActivityId(activity.id)
+                              if (editingDurationId != null) setEditingDurationId(null)
+                              if (editingNameId != null) cancelRenameActivity()
+                              e.dataTransfer.effectAllowed = 'move'
+                              e.dataTransfer.setData('text/plain', String(activity.id))
+                            }}
+                            onDragEnd={() => {
+                              setDraggedActivityId(null)
+                              setDragOverActivityId(null)
+                            }}
+                            title="Drag to reorder"
+                            style={s.dragHandle}
+                          >
+                            ::
+                          </button>
+
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            {editingNameId === activity.id ? (
+                              <input
+                                type="text"
+                                value={editingNameValue}
+                                autoFocus
+                                onChange={e => setEditingNameValue(e.target.value)}
+                                onClick={e => e.stopPropagation()}
+                                onBlur={() => commitRenameActivity(activity.id)}
+                                onKeyDown={e => {
+                                  e.stopPropagation()
+                                  if (e.key === 'Enter') commitRenameActivity(activity.id)
+                                  if (e.key === 'Escape') cancelRenameActivity()
+                                }}
+                                style={{
+                                  ...s.activityNameInput,
+                                  color: isActive ? '#fff' : '#e2e8f0',
+                                }}
+                              />
+                            ) : (
+                              <p style={{ fontSize: 13, fontWeight: 500, color: isActive ? '#fff' : '#a1a1aa', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', margin: 0 }}>
+                                {activity.name}
+                              </p>
+                            )}
+                          </div>
+
+                          {editingNameId !== activity.id && (
+                            <button
+                              onClick={e => {
+                                e.stopPropagation()
+                                beginRenameActivity(activity)
+                              }}
+                              style={s.inlineActionBtn}
+                            >
+                              Edit
+                            </button>
+                          )}
+
+                          {editingDurationId === activity.id ? (
                             <select defaultValue={activity.duration} autoFocus
                               onBlur={e => updateDuration(activity.id, Number(e.target.value))}
                               onChange={e => updateDuration(activity.id, Number(e.target.value))}
@@ -814,7 +1112,7 @@ export default function ControlPanel() {
                               {DURATION_OPTIONS.map(d => <option key={d} value={d}>{d}m</option>)}
                             </select>
                           ) : (
-                            <span style={s.durationBadge} title="Click to edit" onClick={e => { e.stopPropagation(); setEditingId(activity.id) }}>{activity.duration}m</span>
+                            <span style={s.durationBadge} title="Click to edit" onClick={e => { e.stopPropagation(); if (editingNameId != null) cancelRenameActivity(); setEditingDurationId(activity.id) }}>{activity.duration}m</span>
                           )}
                           <button onClick={e => { e.stopPropagation(); removeActivity(activity.id) }} style={s.removeBtn}>✕</button>
                         </div>
@@ -922,7 +1220,7 @@ export default function ControlPanel() {
               {quickRefError && <p style={{ fontSize: 11, color: '#f87171', marginTop: -4 }}>{quickRefError}</p>}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <p style={s.sectionTitle}>Keyword Search</p>
-                <span style={{ fontSize: 10, color: '#4ade80', background: 'rgba(74,222,128,0.08)', border: '1px solid rgba(74,222,128,0.2)', borderRadius: 10, padding: '2px 8px', letterSpacing: '0.06em' }}>FUZZY</span>
+                <span style={{ fontSize: 10, color: '#4ade80', background: 'rgba(74,222,128,0.08)', border: '1px solid rgba(74,222,128,0.2)', borderRadius: 10, padding: '2px 8px', letterSpacing: '0.06em' }}>FUZZY + PHRASE</span>
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <input type="text" placeholder="Type any word or phrase…" value={keywordSearch} onChange={e => { setKeywordSearch(e.target.value); setKeywordSearchError(''); if (!e.target.value.trim()) { setKeywordResults([]); setKeywordSearchProgress('') } }} onKeyDown={e => e.key === 'Enter' && void runKeywordSearch()} style={{ ...s.addInput, flex: 1 }} />
@@ -930,7 +1228,7 @@ export default function ControlPanel() {
               </div>
               {keywordSearchProgress && !keywordSearchError && (<p style={{ fontSize: 11, color: '#64748b', display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#3b82f6' }} />{keywordSearchProgress}</p>)}
               {keywordSearchError && <p style={{ fontSize: 11, color: '#f87171' }}>{keywordSearchError}</p>}
-              <p style={{ fontSize: 10, color: '#475569', marginTop: -4 }}>Partial words, typos, and multi-word queries all work</p>
+              <p style={{ fontSize: 10, color: '#475569', marginTop: -4 }}>Single words stay fuzzy. Multi-word searches keep the words together and rank exact phrases first.</p>
               <div style={s.compactControlGrid}>
                 <div>
                   <div style={s.compactLabelRow}>
@@ -939,7 +1237,7 @@ export default function ControlPanel() {
                   </div>
                   <input type="text" placeholder="KJV, NIV…" value={translationSearch} onChange={e => { setTranslationSearch(e.target.value); setShowTranslationList(true) }} onFocus={() => setShowTranslationList(true)} onBlur={() => setTimeout(() => setShowTranslationList(false), 200)} style={s.compactInput} />
                   {!showTranslationList && (<div style={s.compactSelected}><span style={{ fontWeight: 700 }}>{selectedTranslation}</span><span style={{ color: '#93c5fd', fontSize: 11 }}>{translations.find(t => t.id === selectedTranslation)?.name ?? ''}</span></div>)}
-                  {showTranslationList && (<div style={s.compactList}>{filteredTranslations.slice(0, 100).map((t, i) => (<div key={`${t.id}-${i}`} onMouseDown={() => { setSelectedTranslation(t.id); setTranslationSearch(''); setShowTranslationList(false) }} style={{ ...s.compactListItem, background: t.id === selectedTranslation ? '#1e3a2a' : 'transparent', color: t.id === selectedTranslation ? '#22c55e' : '#cbd5e1' }}><span style={{ fontWeight: 700, minWidth: 42, color: t.id === selectedTranslation ? '#22c55e' : '#e2e8f0' }}>{t.id}</span><span style={{ flex: 1, color: '#64748b', fontSize: 11 }}>{t.name}</span></div>))}</div>)}
+                  {showTranslationList && (<div style={s.compactList}>{filteredTranslations.slice(0, 100).map((t, i) => (<div key={`${t.id}-${i}`} onMouseDown={() => { void handleTranslationSelect(t.id) }} style={{ ...s.compactListItem, background: t.id === selectedTranslation ? '#1e3a2a' : 'transparent', color: t.id === selectedTranslation ? '#22c55e' : '#cbd5e1' }}><span style={{ fontWeight: 700, minWidth: 42, color: t.id === selectedTranslation ? '#22c55e' : '#e2e8f0' }}>{t.id}</span><span style={{ flex: 1, color: '#64748b', fontSize: 11 }}>{t.name}</span></div>))}</div>)}
                 </div>
                 <div>
                   <p style={s.sectionTitle}>Book</p>
@@ -949,10 +1247,55 @@ export default function ControlPanel() {
                 </div>
               </div>
               <p style={s.sectionTitle}>Chapter</p>
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <button onClick={() => { const n = Math.max(1, selectedChapter - 1); setSelectedChapter(n); setChapterInput(String(n)) }} style={{ ...s.ctrlBtn, flex: 'none', width: 40, padding: '8px 0' }}>◀</button>
-                <input type="number" min="1" value={chapterInput} onChange={e => setChapterInput(e.target.value)} onBlur={() => { const n = Math.max(1, parseInt(chapterInput, 10) || 1); setSelectedChapter(n); setChapterInput(String(n)) }} onKeyDown={e => { if (e.key === 'Enter') { const n = Math.max(1, parseInt(chapterInput, 10) || 1); setSelectedChapter(n); setChapterInput(String(n)) } }} style={{ ...s.addInput, flex: 1, textAlign: 'center', fontSize: 18, fontWeight: 600 }} />
-                <button onClick={() => { const n = selectedChapter + 1; setSelectedChapter(n); setChapterInput(String(n)) }} style={{ ...s.ctrlBtn, flex: 'none', width: 40, padding: '8px 0' }}>▶</button>
+              <div style={s.chapterNavBar}>
+                <button
+                  onClick={() => jumpToChapter(selectedChapter - 1)}
+                  disabled={!canGoPrevChapter}
+                  style={{
+                    ...s.chapterNavBtn,
+                    opacity: canGoPrevChapter ? 1 : 0.45,
+                    cursor: canGoPrevChapter ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  <span style={s.chapterNavArrow}>◀</span>
+                  <span>Previous</span>
+                </button>
+                <div style={s.chapterNavCenter}>
+                  <span style={s.chapterNavMeta}>{selectedBook}</span>
+                  <div style={s.chapterInputWrap}>
+                    <input
+                      type="number"
+                      min="1"
+                      max={maxChapterCount}
+                      value={chapterInput}
+                      onChange={e => setChapterInput(e.target.value)}
+                      onBlur={() => {
+                        const n = parseInt(chapterInput, 10) || 1
+                        jumpToChapter(n)
+                      }}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          const n = parseInt(chapterInput, 10) || 1
+                          jumpToChapter(n)
+                        }
+                      }}
+                      style={s.chapterInput}
+                    />
+                    <span style={s.chapterCount}>of {maxChapterCount}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => jumpToChapter(selectedChapter + 1)}
+                  disabled={!canGoNextChapter}
+                  style={{
+                    ...s.chapterNavBtn,
+                    opacity: canGoNextChapter ? 1 : 0.45,
+                    cursor: canGoNextChapter ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  <span>Next</span>
+                  <span style={s.chapterNavArrow}>▶</span>
+                </button>
               </div>
               {keywordResults.length > 0 && (
                 <>
@@ -975,7 +1318,46 @@ export default function ControlPanel() {
               )}
             </aside>
             <main style={s.right}>
-              <p style={s.sectionTitle}>{selectedBook} {selectedChapter} — {chapterViewVerses.length} verse{chapterViewVerses.length !== 1 ? 's' : ''}{bibleLoading && <span style={{ color: '#475569', marginLeft: 8 }}>Loading…</span>}</p>
+              <div style={s.verseHeaderBar}>
+                <div style={s.verseHeaderText}>
+                  <p style={s.sectionTitle}>Verse Browser</p>
+                  <p style={s.verseHeaderTitle}>
+                    {selectedBook} {selectedChapter} — {chapterViewVerses.length} verse{chapterViewVerses.length !== 1 ? 's' : ''}
+                    {bibleLoading && <span style={{ color: '#475569', marginLeft: 8 }}>Loading…</span>}
+                  </p>
+                  <p style={s.verseHeaderMeta}>
+                    {activeVerseIndex >= 0
+                      ? `Active verse ${chapterViewVerses[activeVerseIndex]?.verse} of ${chapterViewVerses.length}`
+                      : 'Select a verse below to enable previous and next'}
+                  </p>
+                </div>
+                <div style={s.verseHeaderActions}>
+                  <button
+                    onClick={() => jumpToVerse(-1)}
+                    disabled={!canGoPrevVerse}
+                    style={{
+                      ...s.verseHeaderBtn,
+                      opacity: canGoPrevVerse ? 1 : 0.45,
+                      cursor: canGoPrevVerse ? 'pointer' : 'not-allowed',
+                    }}
+                  >
+                    <span style={s.chapterNavArrow}>◀</span>
+                    <span>Previous Verse</span>
+                  </button>
+                  <button
+                    onClick={() => jumpToVerse(1)}
+                    disabled={!canGoNextVerse}
+                    style={{
+                      ...s.verseHeaderBtn,
+                      opacity: canGoNextVerse ? 1 : 0.45,
+                      cursor: canGoNextVerse ? 'pointer' : 'not-allowed',
+                    }}
+                  >
+                    <span>Next Verse</span>
+                    <span style={s.chapterNavArrow}>▶</span>
+                  </button>
+                </div>
+              </div>
               <div style={{ ...s.activityList, gap: 4 }}>
                 {chapterViewVerses.map(v => {
                   const isActive = presentState.activeVerse?.verse === v.verse && presentState.activeVerse?.book === selectedBook && presentState.activeVerse?.chapter === selectedChapter
@@ -1263,63 +1645,84 @@ export default function ControlPanel() {
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const s: Record<string, React.CSSProperties> = {
-  page: { minHeight: '100vh', background: '#0f0f11', color: '#fff', fontFamily: 'var(--font-inter), system-ui, sans-serif', display: 'flex', flexDirection: 'column' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 24px', background: 'linear-gradient(180deg,#1a1a1f,#141418)', borderBottom: '1px solid #1e1e24', flexShrink: 0, boxShadow: '0 1px 0 rgba(255,255,255,0.04)' },
-  logoMark: { width: 40, height: 40, borderRadius: 12, overflow: 'hidden', background: '#111827', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: '1px solid #252528', boxShadow: '0 2px 12px rgba(0,0,0,0.3)' },
-  churchName: { fontSize: 14, fontWeight: 600, letterSpacing: '0.01em', color: '#e2e8f0' },
-  subtitle: { fontSize: 10, color: '#475569', marginTop: 2, letterSpacing: '0.1em', textTransform: 'uppercase' },
-  headerBtnNeutral: { background: 'rgba(100,116,139,0.08)', border: '1px solid #252528', borderRadius: 8, padding: '7px 14px', fontSize: 12, fontWeight: 500, cursor: 'pointer', color: '#64748b' },
-  headerBtnGreen: { background: 'rgba(22,101,52,0.15)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: 8, padding: '7px 14px', fontSize: 12, fontWeight: 500, cursor: 'pointer', color: '#4ade80' },
-  bigScreenBtn: { background: 'linear-gradient(135deg,#1e3a5f,#172d4a)', color: '#93c5fd', border: '1px solid rgba(59,130,246,0.3)', padding: '8px 18px', borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: 'pointer', boxShadow: '0 2px 8px rgba(59,130,246,0.15)' },
-  tabBar: { display: 'flex', background: '#141418', borderBottom: '1px solid #1e1e24', flexShrink: 0 },
-  tab: { padding: '12px 20px', background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 500, letterSpacing: '0.02em', transition: 'color 0.15s, background 0.15s' },
-  content: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 },
-  twoCol: { display: 'grid', gridTemplateColumns: '360px 1fr', flex: 1, minHeight: 0 },
-  left: { padding: 18, borderRight: '1px solid #1e1e24', display: 'flex', flexDirection: 'column', gap: 14, overflowY: 'auto', background: '#0f0f11' },
-  right: { padding: 18, display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto' },
-  timerCard: { borderRadius: 14, border: '1px solid', padding: '18px 18px 14px', transition: 'background 0.6s, border-color 0.6s, box-shadow 0.6s' },
-  activityLabel: { fontSize: 10, color: '#475569', textAlign: 'center', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 4, fontWeight: 600 },
-  clockDisplay: { fontFamily: 'var(--font-bebas), cursive', fontSize: 72, lineHeight: 1, textAlign: 'center', letterSpacing: '0.04em', transition: 'color 0.6s' },
-  clockMeta: { fontSize: 11, color: '#334155', textAlign: 'center', marginTop: 6 },
-  progressTrack: { height: 3, background: 'rgba(255,255,255,0.04)', borderRadius: 2, marginTop: 12, overflow: 'hidden' },
-  progressFill: { height: '100%', borderRadius: 2, transition: 'width 0.9s linear, background 0.6s' },
-  legend: { display: 'flex', justifyContent: 'space-between', fontSize: 10, marginTop: 10, color: '#334155' },
-  controlRow: { display: 'flex', gap: 8 },
-  ctrlBtn: { flex: 1, padding: '9px 8px', background: '#1c1c1e', color: '#94a3b8', border: '1px solid #252528', borderRadius: 9, fontSize: 13, fontWeight: 500, cursor: 'pointer', transition: 'background 0.15s' },
-  primaryBtn: { flex: 2, color: '#fff', fontSize: 14, fontWeight: 600 },
-  summaryCard: { background: '#141418', border: '1px solid #1e1e24', borderRadius: 11, padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 7 },
-  summaryRow: { display: 'flex', justifyContent: 'space-between', fontSize: 12 },
-  sectionTitle: { fontSize: 11, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 700, margin: 0 },
-  activityList: { display: 'flex', flexDirection: 'column', gap: 5, flex: 1, overflowY: 'auto' },
-  activityRow: { display: 'flex', alignItems: 'center', gap: 9, padding: '9px 11px', borderRadius: 9, border: '1px solid', cursor: 'pointer', transition: 'background 0.15s, border-color 0.15s, opacity 0.15s, box-shadow 0.15s' },
-  indexBadge: { width: 26, height: 26, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 600, flexShrink: 0, transition: 'background 0.15s, color 0.15s' },
-  durationBadge: { fontSize: 12, color: '#475569', background: '#161618', border: '1px solid #252528', padding: '3px 8px', borderRadius: 6, cursor: 'pointer', minWidth: 36, textAlign: 'center', flexShrink: 0 },
-  durationSelect: { fontSize: 12, background: '#1c1c1e', color: '#fff', border: '1px solid #3f3f46', borderRadius: 6, padding: '3px 4px', width: 64, flexShrink: 0 },
-  removeBtn: { background: 'none', border: 'none', color: '#334155', fontSize: 13, padding: '2px 4px', borderRadius: 4, cursor: 'pointer', flexShrink: 0, transition: 'color 0.15s' },
-  addInput: { flex: 1, background: '#161618', border: '1px solid #252528', borderRadius: 9, padding: '8px 12px', color: '#e2e8f0', fontSize: 13, outline: 'none' },
-  addSelect: { background: '#161618', border: '1px solid #252528', borderRadius: 9, padding: '8px 7px', color: '#e2e8f0', fontSize: 12 },
-  fullSelect: { width: '100%', background: '#161618', border: '1px solid #252528', borderRadius: 9, padding: '8px 12px', color: '#e2e8f0', fontSize: 13 },
-  addBtn: { background: 'linear-gradient(135deg,#166534,#14532d)', color: '#fff', border: '1px solid rgba(34,197,94,0.2)', borderRadius: 9, padding: '8px 18px', fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: '0 2px 8px rgba(22,101,52,0.25)' },
-  editorCard: { background: '#141418', border: '1px solid #1e1e24', borderRadius: 11, padding: 14, display: 'flex', flexDirection: 'column', gap: 8 },
-  emptyState: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: '#252528' },
-  livePanel: { background: 'linear-gradient(180deg,#0f1e3d,#0b1830)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 12, padding: 14, boxShadow: '0 2px 16px rgba(59,130,246,0.06) inset' },
-  livePanelHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8 },
-  livePanelTag: { fontSize: 10, color: '#93c5fd', letterSpacing: '0.16em', textTransform: 'uppercase', fontWeight: 700 },
-  miniActionBtn: { background: 'rgba(22,35,63,0.8)', color: '#93c5fd', border: '1px solid rgba(38,69,116,0.6)', borderRadius: 8, padding: '6px 10px', fontSize: 11, cursor: 'pointer' },
-  livePanelRef: { fontSize: 11, color: '#60a5fa', fontWeight: 700, marginBottom: 6, letterSpacing: '0.02em' },
-  livePanelText: { fontSize: 14, color: '#e2e8f0', lineHeight: 1.65 },
-  livePanelEmpty: { fontSize: 13, color: '#334155', lineHeight: 1.5 },
-  compactControlGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
-  compactLabelRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  linkBtn: { fontSize: 10, color: '#60a5fa', background: 'none', border: 'none', cursor: 'pointer', padding: 0 },
-  compactInput: { width: '100%', background: '#161618', border: '1px solid #252528', borderRadius: 8, padding: '7px 10px', color: '#e2e8f0', fontSize: 12, outline: 'none' },
-  compactSelected: { marginTop: 6, fontSize: 12, color: '#60a5fa', background: 'rgba(30,58,95,0.5)', border: '1px solid rgba(30,64,175,0.3)', borderRadius: 7, padding: '5px 9px', display: 'flex', flexDirection: 'column', gap: 2 },
-  compactList: { marginTop: 6, background: '#141418', border: '1px solid #1e1e24', borderRadius: 9, maxHeight: 170, overflowY: 'auto' },
-  compactListItem: { padding: '7px 10px', cursor: 'pointer', fontSize: 12, borderBottom: '1px solid #161618', display: 'flex', gap: 8, alignItems: 'center' },
-  resultHeaderRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 2 },
-  resultCount: { fontSize: 10, color: '#475569', letterSpacing: '0.06em' },
-  keywordResultsBox: { display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 260, overflowY: 'auto' },
-  keywordResultRow: { display: 'flex', gap: 10, alignItems: 'flex-start', padding: '10px 12px', borderRadius: 9, border: '1px solid', transition: 'background 0.15s, border-color 0.15s' },
-  keywordResultRef: { fontSize: 11, color: '#60a5fa', fontWeight: 700, marginBottom: 4, letterSpacing: '0.02em' },
-  keywordResultText: { fontSize: 12, color: '#94a3b8', lineHeight: 1.6 },
+  page: { minHeight: '100vh', background: 'radial-gradient(circle at top left,#162033 0%,#0b1020 42%,#05070d 100%)', color: '#fff', fontFamily: 'var(--font-inter), system-ui, sans-serif', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' },
+  pageGlowPrimary: { position: 'absolute', top: -180, right: -80, width: 420, height: 420, borderRadius: '50%', background: 'radial-gradient(circle, rgba(56,189,248,0.18) 0%, rgba(56,189,248,0) 70%)', pointerEvents: 'none' },
+  pageGlowSecondary: { position: 'absolute', left: -150, bottom: -240, width: 520, height: 520, borderRadius: '50%', background: 'radial-gradient(circle, rgba(34,197,94,0.14) 0%, rgba(34,197,94,0) 72%)', pointerEvents: 'none' },
+  pageGrid: { position: 'absolute', inset: 0, backgroundImage: 'linear-gradient(rgba(255,255,255,0.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.018) 1px,transparent 1px)', backgroundSize: '92px 92px', opacity: 0.5, maskImage: 'linear-gradient(180deg,rgba(0,0,0,0.6),transparent 88%)', pointerEvents: 'none' },
+  header: { position: 'relative', zIndex: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, flexWrap: 'wrap', margin: '18px 18px 0', padding: '18px 22px', background: 'linear-gradient(180deg,rgba(15,23,35,0.96),rgba(9,13,22,0.94))', border: '1px solid rgba(148,163,184,0.12)', borderRadius: 24, flexShrink: 0, boxShadow: '0 24px 56px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.04)', backdropFilter: 'blur(18px)' },
+  logoMark: { width: 48, height: 48, borderRadius: 16, overflow: 'hidden', background: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: '1px solid rgba(148,163,184,0.16)', boxShadow: '0 10px 22px rgba(0,0,0,0.28)' },
+  churchName: { fontSize: 16, fontWeight: 700, letterSpacing: '0.08em', color: '#f8fafc', textTransform: 'uppercase', lineHeight: 1.15, margin: 0 },
+  subtitle: { fontSize: 11, color: '#8ea1b9', marginTop: 4, letterSpacing: '0.18em', textTransform: 'uppercase' },
+  headerBtnNeutral: { background: 'rgba(148,163,184,0.08)', border: '1px solid rgba(148,163,184,0.12)', borderRadius: 12, padding: '9px 15px', fontSize: 12, fontWeight: 600, cursor: 'pointer', color: '#cbd5e1', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.03)' },
+  headerBtnGreen: { background: 'linear-gradient(135deg,rgba(22,101,52,0.32),rgba(20,83,45,0.18))', border: '1px solid rgba(74,222,128,0.22)', borderRadius: 12, padding: '9px 15px', fontSize: 12, fontWeight: 600, cursor: 'pointer', color: '#86efac', boxShadow: '0 10px 24px rgba(22,101,52,0.16)' },
+  bigScreenBtn: { background: 'linear-gradient(135deg,rgba(14,116,144,0.34),rgba(30,64,175,0.22))', color: '#c7d2fe', border: '1px solid rgba(96,165,250,0.28)', padding: '9px 17px', borderRadius: 12, fontSize: 12, fontWeight: 700, letterSpacing: '0.06em', cursor: 'pointer', boxShadow: '0 12px 24px rgba(30,64,175,0.16)' },
+  headerBtnDanger: { background: 'linear-gradient(135deg,rgba(127,29,29,0.42),rgba(153,27,27,0.2))', color: '#fecaca', border: '1px solid rgba(248,113,113,0.24)', padding: '9px 15px', borderRadius: 12, fontSize: 12, fontWeight: 700, letterSpacing: '0.05em', cursor: 'pointer', boxShadow: '0 10px 24px rgba(127,29,29,0.18)' },
+  tabBar: { position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', margin: '14px 18px 0', padding: '10px', background: 'rgba(9,13,22,0.82)', border: '1px solid rgba(148,163,184,0.10)', borderRadius: 20, boxShadow: '0 16px 36px rgba(0,0,0,0.22)', backdropFilter: 'blur(16px)', flexShrink: 0 },
+  tab: { padding: '11px 16px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(148,163,184,0.08)', cursor: 'pointer', fontSize: 12, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', borderRadius: 14, transition: 'background 0.18s, color 0.18s, border-color 0.18s, box-shadow 0.18s' },
+  content: { position: 'relative', zIndex: 1, flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, padding: '18px' },
+  twoCol: { display: 'grid', gridTemplateColumns: '380px minmax(0,1fr)', flex: 1, minHeight: 0, gap: 18 },
+  left: { minWidth: 0, padding: 20, border: '1px solid rgba(148,163,184,0.10)', display: 'flex', flexDirection: 'column', gap: 16, overflowY: 'auto', background: 'linear-gradient(180deg,rgba(13,18,28,0.95),rgba(7,10,17,0.93))', borderRadius: 22, boxShadow: '0 20px 44px rgba(0,0,0,0.24), inset 0 1px 0 rgba(255,255,255,0.03)', backdropFilter: 'blur(16px)' },
+  right: { minWidth: 0, padding: 20, display: 'flex', flexDirection: 'column', gap: 14, overflowY: 'auto', background: 'linear-gradient(180deg,rgba(11,16,25,0.9),rgba(7,10,16,0.94))', border: '1px solid rgba(148,163,184,0.08)', borderRadius: 22, boxShadow: '0 20px 40px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.02)' },
+  timerCard: { borderRadius: 22, border: '1px solid', padding: '22px 22px 18px', transition: 'background 0.6s, border-color 0.6s, box-shadow 0.6s', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.03)' },
+  activityLabel: { fontSize: 10, color: '#91a4be', textAlign: 'center', textTransform: 'uppercase', letterSpacing: '0.2em', marginBottom: 8, fontWeight: 700 },
+  clockDisplay: { fontFamily: 'var(--font-bebas), cursive', fontSize: 78, lineHeight: 0.95, textAlign: 'center', letterSpacing: '0.05em', transition: 'color 0.6s', textShadow: '0 10px 34px rgba(0,0,0,0.24)' },
+  clockMeta: { fontSize: 11, color: '#60708a', textAlign: 'center', marginTop: 8, letterSpacing: '0.04em' },
+  progressTrack: { height: 5, background: 'rgba(255,255,255,0.06)', borderRadius: 999, marginTop: 14, overflow: 'hidden' },
+  progressFill: { height: '100%', borderRadius: 999, transition: 'width 0.9s linear, background 0.6s' },
+  legend: { display: 'flex', justifyContent: 'space-between', fontSize: 10, marginTop: 12, color: '#64748b', letterSpacing: '0.06em', textTransform: 'uppercase' },
+  controlRow: { display: 'flex', gap: 10 },
+  ctrlBtn: { flex: 1, padding: '11px 10px', background: 'rgba(255,255,255,0.03)', color: '#d6e2f0', border: '1px solid rgba(148,163,184,0.12)', borderRadius: 12, fontSize: 13, fontWeight: 600, cursor: 'pointer', transition: 'background 0.15s, border-color 0.15s, box-shadow 0.15s', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.03)' },
+  primaryBtn: { flex: 2, color: '#fff', fontSize: 14, fontWeight: 700 },
+  summaryCard: { background: 'linear-gradient(180deg,rgba(12,18,29,0.88),rgba(8,12,20,0.9))', border: '1px solid rgba(148,163,184,0.08)', borderRadius: 18, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 8, boxShadow: '0 14px 28px rgba(0,0,0,0.18)' },
+  summaryRow: { display: 'flex', justifyContent: 'space-between', fontSize: 12, gap: 14 },
+  sectionTitle: { fontSize: 10, color: '#9fb2ca', textTransform: 'uppercase', letterSpacing: '0.18em', fontWeight: 800, margin: 0 },
+  activityList: { display: 'flex', flexDirection: 'column', gap: 8, flex: 1, overflowY: 'auto' },
+  activityRow: { display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', borderRadius: 14, border: '1px solid', cursor: 'pointer', transition: 'background 0.15s, border-color 0.15s, opacity 0.15s, box-shadow 0.15s, transform 0.15s' },
+  indexBadge: { width: 30, height: 30, borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, flexShrink: 0, transition: 'background 0.15s, color 0.15s' },
+  dragHandle: { background: 'rgba(15,23,42,0.9)', border: '1px solid rgba(148,163,184,0.12)', color: '#64748b', borderRadius: 10, padding: '6px 7px', fontSize: 12, fontWeight: 700, lineHeight: 1, letterSpacing: '0.12em', cursor: 'grab', flexShrink: 0 },
+  activityNameInput: { width: '100%', background: 'rgba(5,10,18,0.85)', border: '1px solid rgba(96,165,250,0.24)', borderRadius: 10, padding: '7px 10px', fontSize: 13, fontWeight: 500, outline: 'none', boxSizing: 'border-box' },
+  inlineActionBtn: { background: 'rgba(15,23,42,0.9)', border: '1px solid rgba(148,163,184,0.12)', color: '#cbd5e1', fontSize: 11, padding: '5px 9px', borderRadius: 9, cursor: 'pointer', flexShrink: 0 },
+  durationBadge: { fontSize: 11, color: '#a5b4fc', background: 'rgba(30,41,59,0.72)', border: '1px solid rgba(148,163,184,0.12)', padding: '4px 10px', borderRadius: 999, cursor: 'pointer', minWidth: 46, textAlign: 'center', flexShrink: 0 },
+  durationSelect: { fontSize: 12, background: 'rgba(8,12,20,0.92)', color: '#f8fafc', border: '1px solid rgba(148,163,184,0.18)', borderRadius: 10, padding: '5px 8px', width: 70, flexShrink: 0 },
+  removeBtn: { background: 'rgba(248,113,113,0.06)', border: '1px solid rgba(248,113,113,0.08)', color: '#94a3b8', fontSize: 12, padding: '4px 7px', borderRadius: 8, cursor: 'pointer', flexShrink: 0, transition: 'color 0.15s, border-color 0.15s, background 0.15s' },
+  addInput: { flex: 1, background: 'rgba(5,10,18,0.78)', border: '1px solid rgba(148,163,184,0.12)', borderRadius: 12, padding: '10px 12px', color: '#e2e8f0', fontSize: 13, outline: 'none', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.03)' },
+  addSelect: { background: 'rgba(5,10,18,0.78)', border: '1px solid rgba(148,163,184,0.12)', borderRadius: 12, padding: '10px 8px', color: '#e2e8f0', fontSize: 12 },
+  fullSelect: { width: '100%', background: 'rgba(5,10,18,0.78)', border: '1px solid rgba(148,163,184,0.12)', borderRadius: 12, padding: '10px 12px', color: '#e2e8f0', fontSize: 13 },
+  addBtn: { background: 'linear-gradient(135deg,#15803d,#166534)', color: '#fff', border: '1px solid rgba(74,222,128,0.22)', borderRadius: 12, padding: '10px 18px', fontSize: 13, fontWeight: 700, cursor: 'pointer', boxShadow: '0 12px 24px rgba(22,101,52,0.22)' },
+  editorCard: { background: 'linear-gradient(180deg,rgba(10,15,24,0.94),rgba(7,10,16,0.9))', border: '1px solid rgba(148,163,184,0.08)', borderRadius: 18, padding: 16, display: 'flex', flexDirection: 'column', gap: 10, boxShadow: '0 14px 28px rgba(0,0,0,0.18)' },
+  emptyState: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: '#3b485c', background: 'linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01))', border: '1px dashed rgba(148,163,184,0.10)', borderRadius: 18 },
+  livePanel: { background: 'linear-gradient(180deg,rgba(10,25,48,0.94),rgba(8,18,34,0.92))', border: '1px solid rgba(96,165,250,0.18)', borderRadius: 18, padding: 16, boxShadow: '0 16px 30px rgba(8,47,73,0.22), inset 0 1px 0 rgba(255,255,255,0.03)' },
+  livePanelHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8 },
+  livePanelTag: { fontSize: 10, color: '#93c5fd', letterSpacing: '0.18em', textTransform: 'uppercase', fontWeight: 800 },
+  miniActionBtn: { background: 'rgba(13,31,57,0.82)', color: '#bfdbfe', border: '1px solid rgba(96,165,250,0.18)', borderRadius: 10, padding: '7px 11px', fontSize: 11, cursor: 'pointer' },
+  livePanelRef: { fontSize: 11, color: '#7dd3fc', fontWeight: 700, marginBottom: 8, letterSpacing: '0.03em' },
+  livePanelText: { fontSize: 14, color: '#e2e8f0', lineHeight: 1.7 },
+  livePanelEmpty: { fontSize: 13, color: '#64748b', lineHeight: 1.6 },
+  compactControlGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
+  compactLabelRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  linkBtn: { fontSize: 10, color: '#7dd3fc', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' },
+  compactInput: { width: '100%', background: 'rgba(5,10,18,0.78)', border: '1px solid rgba(148,163,184,0.12)', borderRadius: 10, padding: '8px 10px', color: '#e2e8f0', fontSize: 12, outline: 'none' },
+  compactSelected: { marginTop: 8, fontSize: 12, color: '#bae6fd', background: 'rgba(12,32,58,0.72)', border: '1px solid rgba(96,165,250,0.18)', borderRadius: 10, padding: '7px 10px', display: 'flex', flexDirection: 'column', gap: 3 },
+  compactList: { marginTop: 8, background: 'rgba(11,16,25,0.88)', border: '1px solid rgba(148,163,184,0.08)', borderRadius: 12, maxHeight: 170, overflowY: 'auto' },
+  compactListItem: { padding: '8px 11px', cursor: 'pointer', fontSize: 12, borderBottom: '1px solid rgba(255,255,255,0.03)', display: 'flex', gap: 8, alignItems: 'center' },
+  chapterNavBar: { display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(140px,180px) minmax(0,1fr)', gap: 10, alignItems: 'stretch' },
+  chapterNavBtn: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8, background: 'linear-gradient(180deg,rgba(15,23,42,0.92),rgba(9,13,22,0.92))', border: '1px solid rgba(148,163,184,0.12)', borderRadius: 14, color: '#dbeafe', padding: '0 14px', minHeight: 54, fontSize: 12, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.03)' },
+  chapterNavArrow: { fontSize: 12, color: '#7dd3fc', lineHeight: 1, flexShrink: 0 },
+  chapterNavCenter: { display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: 6, background: 'linear-gradient(180deg,rgba(8,17,30,0.94),rgba(6,11,20,0.94))', border: '1px solid rgba(96,165,250,0.14)', borderRadius: 16, padding: '8px 12px', boxShadow: '0 12px 24px rgba(2,6,23,0.2), inset 0 1px 0 rgba(255,255,255,0.03)' },
+  chapterNavMeta: { fontSize: 10, color: '#7dd3fc', fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', maxWidth: '100%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  chapterInputWrap: { display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 8 },
+  chapterInput: { width: 64, background: 'transparent', border: 'none', color: '#f8fafc', fontSize: 26, fontWeight: 700, textAlign: 'center', outline: 'none', padding: 0, appearance: 'textfield' as React.CSSProperties['appearance'], MozAppearance: 'textfield' as React.CSSProperties['MozAppearance'] },
+  chapterCount: { fontSize: 11, color: '#94a3b8', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase' },
+  verseHeaderBar: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, marginBottom: 6, padding: '12px 14px', background: 'linear-gradient(180deg,rgba(10,17,29,0.9),rgba(7,12,21,0.92))', border: '1px solid rgba(148,163,184,0.08)', borderRadius: 16, boxShadow: '0 14px 28px rgba(0,0,0,0.16), inset 0 1px 0 rgba(255,255,255,0.03)' },
+  verseHeaderText: { display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 },
+  verseHeaderTitle: { fontSize: 14, color: '#e2e8f0', fontWeight: 700, margin: 0, lineHeight: 1.4 },
+  verseHeaderMeta: { fontSize: 11, color: '#64748b', margin: 0, lineHeight: 1.5 },
+  verseHeaderActions: { display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 },
+  verseHeaderBtn: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8, background: 'rgba(15,23,42,0.9)', border: '1px solid rgba(96,165,250,0.14)', color: '#dbeafe', borderRadius: 12, padding: '10px 14px', minHeight: 42, fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.03)' },
+  resultHeaderRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 },
+  resultCount: { fontSize: 10, color: '#64748b', letterSpacing: '0.08em', textTransform: 'uppercase' },
+  keywordResultsBox: { display: 'flex', flexDirection: 'column', gap: 7, maxHeight: 260, overflowY: 'auto' },
+  keywordResultRow: { display: 'flex', gap: 10, alignItems: 'flex-start', padding: '11px 13px', borderRadius: 12, border: '1px solid', transition: 'background 0.15s, border-color 0.15s, box-shadow 0.15s' },
+  keywordResultRef: { fontSize: 11, color: '#7dd3fc', fontWeight: 700, marginBottom: 5, letterSpacing: '0.04em' },
+  keywordResultText: { fontSize: 12, color: '#b8c7d9', lineHeight: 1.65 },
 }

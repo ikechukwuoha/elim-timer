@@ -1,0 +1,236 @@
+.shell {
+  min-height: 100vh;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top left, rgba(25, 120, 115, 0.24), transparent 28%),
+    radial-gradient(circle at 85% 14%, rgba(240, 201, 121, 0.12), transparent 24%),
+    linear-gradient(180deg, #071220 0%, #040a12 100%);
+  color: #f8fafc;
+}
+
+.orbPrimary,
+.orbSecondary {
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(24px);
+  opacity: 0.72;
+  pointer-events: none;
+}
+
+.orbPrimary {
+  width: 20rem;
+  height: 20rem;
+  top: 4rem;
+  left: -6rem;
+  background: rgba(24, 184, 162, 0.2);
+}
+
+.orbSecondary {
+  width: 16rem;
+  height: 16rem;
+  right: -3rem;
+  top: 12rem;
+  background: rgba(240, 201, 121, 0.16);
+}
+
+.main {
+  position: relative;
+  z-index: 1;
+  width: min(1180px, calc(100% - 2rem));
+  margin: 0 auto;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+  gap: 1.25rem;
+  align-items: center;
+  padding: 2rem 0;
+}
+
+.infoPanel,
+.formPanel {
+  border-radius: 28px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: linear-gradient(180deg, rgba(8, 19, 33, 0.92), rgba(6, 14, 25, 0.96));
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(18px);
+}
+
+.infoPanel {
+  padding: clamp(1.6rem, 4vw, 2.8rem);
+}
+
+.formPanel {
+  padding: 1.5rem;
+}
+
+.kicker,
+.formBadge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 0.45rem 0.8rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.kicker {
+  background: rgba(89, 214, 195, 0.12);
+  border: 1px solid rgba(89, 214, 195, 0.22);
+  color: #bdf7ee;
+}
+
+.formBadge {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  color: #9cb0c8;
+}
+
+.title {
+  margin-top: 1rem;
+  max-width: 11ch;
+  font-size: clamp(2.6rem, 6vw, 4.8rem);
+  line-height: 0.96;
+  letter-spacing: -0.05em;
+}
+
+.lead {
+  margin-top: 1.15rem;
+  max-width: 40rem;
+  color: #9cb0c8;
+  line-height: 1.85;
+  font-size: 1.04rem;
+}
+
+.featureList {
+  margin-top: 1.5rem;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.featureList p {
+  padding: 1rem 1rem 1rem 1.1rem;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+  color: #d8e2f0;
+  line-height: 1.7;
+}
+
+.backLink {
+  display: inline-flex;
+  margin-top: 1.5rem;
+  color: #59d6c3;
+  font-weight: 600;
+}
+
+.formHeader {
+  margin-bottom: 1rem;
+}
+
+.formTitle {
+  margin-top: 0.9rem;
+  font-size: 2rem;
+  line-height: 1.1;
+}
+
+.formText {
+  margin-top: 0.7rem;
+  color: #9cb0c8;
+  line-height: 1.7;
+}
+
+.infoMessage,
+.errorBox {
+  border-radius: 16px;
+  padding: 0.9rem 1rem;
+  line-height: 1.6;
+  font-size: 0.95rem;
+}
+
+.infoMessage {
+  margin-bottom: 1rem;
+  background: rgba(89, 214, 195, 0.1);
+  border: 1px solid rgba(89, 214, 195, 0.18);
+  color: #bdf7ee;
+}
+
+.errorBox {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+  color: #fecaca;
+}
+
+.form {
+  display: grid;
+  gap: 1rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.field span {
+  color: #d8e2f0;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.field input {
+  width: 100%;
+  min-height: 3.2rem;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 0.9rem 1rem;
+  color: #f8fafc;
+  outline: none;
+}
+
+.field input:focus {
+  border-color: rgba(89, 214, 195, 0.38);
+  box-shadow: 0 0 0 3px rgba(89, 214, 195, 0.1);
+}
+
+.submitButton {
+  min-height: 3.2rem;
+  border: none;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #59d6c3, #18b8a2);
+  color: #03201d;
+  font-weight: 800;
+  font-size: 0.98rem;
+  cursor: pointer;
+}
+
+.submitButton:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+@media (max-width: 900px) {
+  .main {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .main {
+    width: min(100%, calc(100% - 1rem));
+    padding: 1rem 0;
+  }
+
+  .infoPanel,
+  .formPanel {
+    border-radius: 20px;
+  }
+
+  .title {
+    max-width: none;
+    font-size: clamp(2.25rem, 10vw, 3.2rem);
+  }
+}

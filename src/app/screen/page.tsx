@@ -401,8 +401,142 @@ export default function BigScreen() {
                 </div>
               </div>
 
-              {/* Right: status indicators */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 8 : 16, flexShrink: 0 }}>
+              {/* Right: timer + status */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 10 : 20, flexShrink: 0 }}>
+
+                {/* Timer digits in header (only when bible/song mode) */}
+                {showWithContent && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center',
+                    gap: isMobile ? 8 : 16,
+                    padding: isMobile ? '6px 12px' : '8px 22px',
+                    background: 'linear-gradient(135deg,rgba(0,0,0,0.65) 0%,rgba(0,0,0,0.45) 100%)',
+                    border: `1.5px solid ${theme.timerColor}55`,
+                    borderRadius: isMobile ? 12 : 16,
+                    backdropFilter: 'blur(20px)',
+                    WebkitBackdropFilter: 'blur(20px)',
+                    boxShadow: `0 0 0 1px ${theme.timerColor}20, 0 6px 28px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.07), 0 0 32px ${theme.glowColor}`,
+                  }}>
+
+                    {/* Status label — hidden on mobile */}
+                    {!isMobile && (
+                      <p className="lbl-p" style={{
+                        fontSize: 'clamp(9px,0.85vw,13px)',
+                        fontWeight: 800, color: theme.timerColor,
+                        letterSpacing: '0.32em', textTransform: 'uppercase',
+                        margin: 0,
+                        textShadow: `0 0 16px ${theme.glowColor}, 0 0 32px ${theme.glowColor}`,
+                      }}>
+                        {statusTxt}
+                      </p>
+                    )}
+
+                    {!isMobile && (
+                      <div style={{ width: 1, height: 28, background: `${theme.timerColor}40`, flexShrink: 0 }} />
+                    )}
+
+                    {/* BIG digits */}
+                    <p
+                      className={isCrit ? 'tx' : color === 'yellow' ? 'tw' : 'tc'}
+                      style={{
+                        fontFamily: 'var(--font-bebas),cursive',
+                        fontSize: isMobile ? 'clamp(28px,7.5vw,40px)' : 'clamp(36px,4.2vw,62px)',
+                        lineHeight: 1,
+                        color: blinkVisible ? theme.timerColor : 'transparent',
+                        letterSpacing: '0.04em',
+                        transition: isCrit ? 'none' : 'color 1s ease',
+                        userSelect: 'none',
+                        margin: 0,
+                        textShadow: `0 0 24px ${theme.glowColor}, 0 0 48px ${theme.glowColor}`,
+                      }}
+                    >
+                      {formatTime(displayRemaining)}
+                    </p>
+
+                    {!isMobile && (
+                      <div style={{ width: 1, height: 28, background: `${theme.timerColor}40`, flexShrink: 0 }} />
+                    )}
+
+                    {/* Activity name + duration — hidden on mobile */}
+                    {!isMobile && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                        <p style={{
+                          fontFamily: 'var(--font-cinzel),serif',
+                          fontSize: 'clamp(10px,1vw,15px)',
+                          fontWeight: 700, color: 'rgba(255,255,255,0.95)',
+                          letterSpacing: '0.06em', margin: 0, lineHeight: 1.2,
+                          maxWidth: 'clamp(90px,11vw,180px)',
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          textShadow: `0 0 14px ${theme.glowColor}`,
+                        }}>
+                          {current.name}
+                        </p>
+                        <p style={{
+                          fontSize: 'clamp(9px,0.75vw,11px)',
+                          fontWeight: 700, color: 'rgba(255,255,255,0.55)',
+                          letterSpacing: '0.24em', textTransform: 'uppercase', margin: 0,
+                        }}>
+                          {current.duration} min
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Vertical progress pip */}
+                    <div style={{
+                      width: 4,
+                      height: isMobile ? 28 : 42,
+                      background: 'rgba(255,255,255,0.08)',
+                      borderRadius: 2, overflow: 'hidden', flexShrink: 0,
+                    }}>
+                      <div className="bar-p" style={{
+                        width: '100%',
+                        height: `${pct}%`,
+                        background: `linear-gradient(180deg,${theme.timerColor}88,${theme.timerColor})`,
+                        borderRadius: 2,
+                        transition: 'height 0.9s linear, background 1s ease',
+                        boxShadow: `0 0 8px ${theme.glowColor}`,
+                        position: 'relative',
+                        top: `${100 - pct}%`,
+                        transform: 'translateY(-100%)',
+                      }} />
+                    </div>
+
+                    {/* Next up — desktop only */}
+                    {hasNext && !isTablet && !isMobile && (
+                      <div style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 5,
+                        minWidth: 'clamp(150px, 14vw, 220px)',
+                        padding: '7px 16px',
+                        background: 'rgba(251,191,36,0.09)',
+                        border: '1px solid rgba(251,191,36,0.4)',
+                        borderRadius: 12,
+                      }}>
+                        <p style={{
+                          fontSize: 'clamp(8px,0.72vw,10px)',
+                          color: '#fbbf24', letterSpacing: '0.3em',
+                          textTransform: 'uppercase', margin: 0,
+                          fontWeight: 700, textShadow: '0 0 10px rgba(251,191,36,0.7)',
+                        }}>
+                          ▶ Up Next
+                        </p>
+                        <p style={{
+                          fontSize: 'clamp(10px,0.95vw,14px)',
+                          color: '#fff', fontWeight: 700,
+                          letterSpacing: '0.05em', margin: 0,
+                          maxWidth: 'clamp(120px,12vw,190px)',
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          textShadow: '0 0 12px rgba(251,191,36,0.35)',
+                        }}>
+                          {safeActivities[idx + 1].name}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Live/Paused dot + mode label */}
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: isMobile ? 5 : 9,
                   fontSize: isMobile ? 9 : 13,
@@ -591,8 +725,10 @@ export default function BigScreen() {
                       marginTop: isMobile ? '12px' : 'clamp(14px,2vw,30px)',
                       display: 'inline-flex',
                       alignItems: 'center',
-                      gap: isMobile ? 8 : 14,
-                      padding: isMobile ? '8px 18px' : 'clamp(10px,1.2vh,16px) clamp(20px,2.4vw,40px)',
+                      justifyContent: 'center',
+                      gap: isMobile ? 10 : 18,
+                      minWidth: isMobile ? 'min(240px, 84vw)' : 'clamp(320px, 34vw, 500px)',
+                      padding: isMobile ? '10px 22px' : 'clamp(12px,1.5vh,20px) clamp(28px,3vw,54px)',
                       background: 'rgba(251,191,36,0.10)',
                       border: '2px solid rgba(251,191,36,0.55)',
                       borderRadius: 999,
@@ -601,7 +737,7 @@ export default function BigScreen() {
                   >
                     {/* Arrow icon */}
                     <span style={{
-                      fontSize: isMobile ? '13px' : 'clamp(14px,1.6vw,22px)',
+                      fontSize: isMobile ? '16px' : 'clamp(18px,1.9vw,28px)',
                       color: '#fbbf24',
                       lineHeight: 1,
                       flexShrink: 0,
@@ -609,9 +745,9 @@ export default function BigScreen() {
                       ▶
                     </span>
 
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3, minWidth: 0 }}>
                       <span style={{
-                        fontSize: isMobile ? '9px' : 'clamp(10px,1vw,14px)',
+                        fontSize: isMobile ? '10px' : 'clamp(12px,1.15vw,16px)',
                         fontWeight: 700,
                         color: '#fbbf24',
                         letterSpacing: '0.35em',
@@ -622,14 +758,18 @@ export default function BigScreen() {
                         Up Next
                       </span>
                       <span style={{
-                        fontSize: isMobile ? '13px' : 'clamp(14px,1.8vw,26px)',
+                        fontSize: isMobile ? '16px' : 'clamp(18px,2.2vw,30px)',
                         fontWeight: 700,
                         color: '#fff',
                         letterSpacing: isMobile ? '0.06em' : '0.1em',
                         textShadow: '0 0 24px rgba(251,191,36,0.4), 0 2px 6px rgba(0,0,0,0.8)',
-                        lineHeight: 1.2,
+                        lineHeight: 1.15,
                         textTransform: 'uppercase',
                         fontFamily: 'var(--font-cinzel),serif',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        maxWidth: '100%',
                       }}>
                         {safeActivities[idx + 1].name}
                       </span>
@@ -642,270 +782,38 @@ export default function BigScreen() {
             {/* ── Bible / Song mode ── */}
             {showWithContent && (
               <div
+                className="fi"
                 style={{
                   width: '100%',
                   height: '100%',
-                  display: 'grid',
-                  gridTemplateColumns: isMobile
-                    ? '1fr'
-                    : isTablet
-                      ? 'minmax(0,1fr) clamp(140px,14vw,180px)'
-                      : 'minmax(0,1fr) clamp(160px, 16vw, 220px)',
-                  gridTemplateRows: isMobile ? '1fr auto' : '1fr',
-                  gap: isMobile ? '8px' : 'clamp(10px, 1.4vw, 18px)',
-                  alignItems: 'stretch',
+                  borderRadius: isMobile ? 14 : 20,
+                  border: `1px solid ${PRESENT_COLOR}30`,
+                  background: 'rgba(4,8,20,0.6)',
+                  boxShadow: `0 0 0 1px ${PRESENT_COLOR}15, 0 8px 48px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.04)`,
+                  overflow: 'hidden',
+                  backdropFilter: 'blur(12px)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
                 }}
               >
-                {/* Content panel */}
-                <div
-                  className="fi"
-                  style={{
-                    minWidth: 0,
-                    minHeight: 0,
-                    borderRadius: isMobile ? 14 : 20,
-                    border: `1px solid ${PRESENT_COLOR}30`,
-                    background: 'rgba(4,8,20,0.6)',
-                    boxShadow: `0 0 0 1px ${PRESENT_COLOR}15, 0 8px 48px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.04)`,
-                    overflow: 'hidden',
-                    backdropFilter: 'blur(12px)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                >
-                  {isBibleMode && presentState.activeVerse && (
-                    <BibleView
-                      verse={presentState.activeVerse}
-                      glowColor={PRESENT_GLOW}
-                      timerColor={PRESENT_COLOR}
-                    />
-                  )}
-                  {isSongMode && activeSong && (
-                    <SongView
-                      song={activeSong}
-                      lineIndex={presentState.activeLineIndex}
-                      glowColor={PRESENT_GLOW}
-                      timerColor={PRESENT_COLOR}
-                    />
-                  )}
-                </div>
-
-                {/* Timer sidebar */}
-                {isMobile ? (
-                  <div
-                    className="su"
-                    style={{
-                      minWidth: 0,
-                      border: `1px solid ${theme.timerColor}28`,
-                      background: 'rgba(0,0,0,0.5)',
-                      borderRadius: 14,
-                      padding: '10px 14px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 10,
-                      backdropFilter: 'blur(10px)',
-                      boxSizing: 'border-box',
-                      flexShrink: 0,
-                    }}
-                  >
-                    <p
-                      className={isCrit ? 'tx' : color === 'yellow' ? 'tw' : 'tc'}
-                      style={{
-                        fontFamily: 'var(--font-bebas),cursive',
-                        fontSize: 'clamp(32px, 11vw, 52px)',
-                        lineHeight: 1,
-                        color: blinkVisible ? theme.timerColor : 'transparent',
-                        letterSpacing: '0.03em',
-                        transition: isCrit ? 'none' : 'color 1s ease',
-                        userSelect: 'none',
-                        margin: 0,
-                        flexShrink: 0,
-                      }}
-                    >
-                      {formatTime(displayRemaining)}
-                    </p>
-
-                    <div style={{ width: 1, alignSelf: 'stretch', background: `${theme.timerColor}30`, flexShrink: 0 }} />
-
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <p className="lbl-p" style={{
-                        fontSize: '9px', fontWeight: 800,
-                        color: theme.timerColor, letterSpacing: '0.28em',
-                        textTransform: 'uppercase', margin: '0 0 2px',
-                        textShadow: `0 0 10px ${theme.glowColor}`,
-                      }}>
-                        {statusTxt}
-                      </p>
-                      <p style={{
-                        fontFamily: 'var(--font-cinzel),serif',
-                        fontSize: '10px', fontWeight: 600,
-                        color: 'rgba(255,255,255,0.85)',
-                        margin: 0, lineHeight: 1.3,
-                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      }}>
-                        {current.name}
-                      </p>
-                      <p style={{
-                        fontSize: '8px', color: 'rgba(255,255,255,0.55)',
-                        letterSpacing: '0.22em', textTransform: 'uppercase', margin: '2px 0 0',
-                        fontWeight: 600,
-                      }}>
-                        {current.duration} min
-                      </p>
-                    </div>
-
-                    <div style={{
-                      width: 4, height: '100%', minHeight: 36,
-                      background: 'rgba(255,255,255,0.06)',
-                      borderRadius: 2, overflow: 'hidden', flexShrink: 0,
-                    }}>
-                      <div className="bar-p" style={{
-                        width: '100%',
-                        height: `${pct}%`,
-                        background: `linear-gradient(180deg,${theme.timerColor}88,${theme.timerColor})`,
-                        borderRadius: 2,
-                        transition: 'height 0.9s linear, background 1s ease',
-                        boxShadow: `0 0 8px ${theme.glowColor}`,
-                        position: 'relative',
-                        top: `${100 - pct}%`,
-                        transform: 'translateY(-100%)',
-                      }} />
-                    </div>
-                  </div>
-                ) : (
-                  <div
-                    className="sr"
-                    style={{
-                      minWidth: 0,
-                      border: `1px solid ${theme.timerColor}28`,
-                      background: 'rgba(0,0,0,0.45)',
-                      borderRadius: 20,
-                      boxShadow: `0 0 0 1px ${theme.timerColor}12, 0 8px 32px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.03)`,
-                      padding: isTablet ? '14px 10px 12px' : '18px 12px 16px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'center',
-                      alignItems: 'center',
-                      backdropFilter: 'blur(10px)',
-                      gap: isTablet ? 6 : 8,
-                      transition: 'border-color .5s, box-shadow .5s',
-                      boxSizing: 'border-box',
-                    }}
-                  >
-                    <div style={{
-                      width: '60%', height: 2, borderRadius: 1,
-                      background: `linear-gradient(to right,transparent,${theme.timerColor},transparent)`,
-                      opacity: 0.5, marginBottom: 4,
-                    }} />
-
-                    {/* Sidebar status text */}
-                    <p className="lbl-p" style={{
-                      fontSize: isTablet ? 'clamp(8px,0.75vw,11px)' : 'clamp(9px,0.85vw,13px)',
-                      fontWeight: 800, color: theme.timerColor,
-                      letterSpacing: '0.3em', textTransform: 'uppercase',
-                      margin: 0, textAlign: 'center',
-                      textShadow: `0 0 14px ${theme.glowColor}, 0 0 28px ${theme.glowColor}`,
-                    }}>
-                      {statusTxt}
-                    </p>
-
-                    <p
-                      className={isCrit ? 'tx' : color === 'yellow' ? 'tw' : 'tc'}
-                      style={{
-                        fontFamily: 'var(--font-bebas),cursive',
-                        fontSize: isTablet ? 'clamp(34px,6.5vw,60px)' : 'clamp(42px,8.5vw,80px)',
-                        lineHeight: 1,
-                        color: blinkVisible ? theme.timerColor : 'transparent',
-                        letterSpacing: '0.03em',
-                        transition: isCrit ? 'none' : 'color 1s ease',
-                        userSelect: 'none',
-                        margin: 0, textAlign: 'center',
-                      }}
-                    >
-                      {formatTime(displayRemaining)}
-                    </p>
-
-                    <div style={{
-                      width: '75%', height: 1, borderRadius: 1,
-                      background: `linear-gradient(to right,transparent,${theme.timerColor}60,transparent)`,
-                      opacity: 0.6,
-                    }} />
-
-                    <p style={{
-                      fontFamily: 'var(--font-cinzel),serif',
-                      fontSize: isTablet ? 'clamp(9px,0.85vw,12px)' : 'clamp(10px,1vw,13px)',
-                      fontWeight: 600, color: 'rgba(255,255,255,0.85)',
-                      letterSpacing: '0.06em', textAlign: 'center',
-                      textShadow: `0 0 14px ${theme.glowColor}`,
-                      lineHeight: 1.35, margin: 0,
-                    }}>
-                      {current.name}
-                    </p>
-
-                    {/* Sidebar minutes allocated */}
-                    <p style={{
-                      fontSize: isTablet ? 'clamp(8px,0.75vw,10px)' : 'clamp(9px,0.85vw,11px)',
-                      fontWeight: 700, color: 'rgba(255,255,255,0.7)',
-                      letterSpacing: '0.22em', textTransform: 'uppercase',
-                      textAlign: 'center', margin: 0,
-                    }}>
-                      {current.duration} min
-                    </p>
-
-                    <div style={{
-                      width: '88%', height: 3,
-                      background: 'rgba(255,255,255,0.06)',
-                      borderRadius: 2, overflow: 'hidden', flexShrink: 0,
-                    }}>
-                      <div className="bar-p" style={{
-                        height: '100%', width: `${pct}%`,
-                        background: `linear-gradient(90deg,${theme.timerColor}88,${theme.timerColor})`,
-                        borderRadius: 2,
-                        transition: 'width 0.9s linear, background 1s ease',
-                        boxShadow: `0 0 8px ${theme.glowColor}`,
-                      }} />
-                    </div>
-
-                    {/* Sidebar next activity */}
-                    {hasNext && (
-                      <div style={{
-                        marginTop: 6, textAlign: 'center',
-                        padding: isTablet ? '7px 10px' : '10px 12px',
-                        background: 'rgba(251,191,36,0.08)',
-                        border: '1px solid rgba(251,191,36,0.45)',
-                        borderRadius: 10, width: '100%', boxSizing: 'border-box',
-                      }}>
-                        <p style={{
-                          fontSize: 'clamp(7px,0.65vw,9px)',
-                          color: '#fbbf24',
-                          letterSpacing: '0.28em', textTransform: 'uppercase',
-                          margin: '0 0 4px', fontWeight: 700,
-                          textShadow: '0 0 10px rgba(251,191,36,0.6)',
-                        }}>
-                          ▶ Up Next
-                        </p>
-                        <p style={{
-                          fontSize: isTablet ? 'clamp(8px,0.75vw,10px)' : 'clamp(9px,0.9vw,12px)',
-                          color: '#fff',
-                          fontWeight: 700,
-                          letterSpacing: '0.06em', lineHeight: 1.3, margin: 0,
-                          textShadow: '0 0 12px rgba(251,191,36,0.3)',
-                        }}>
-                          {safeActivities[idx + 1].name}
-                        </p>
-                      </div>
-                    )}
-
-                    <div style={{
-                      width: '60%', height: 2, borderRadius: 1,
-                      background: `linear-gradient(to right,transparent,${theme.timerColor},transparent)`,
-                      opacity: 0.3, marginTop: 4,
-                    }} />
-                  </div>
+                {isBibleMode && presentState.activeVerse && (
+                  <BibleView
+                    verse={presentState.activeVerse}
+                    glowColor={PRESENT_GLOW}
+                    timerColor={PRESENT_COLOR}
+                  />
+                )}
+                {isSongMode && activeSong && (
+                  <SongView
+                    song={activeSong}
+                    lineIndex={presentState.activeLineIndex}
+                    glowColor={PRESENT_GLOW}
+                    timerColor={PRESENT_COLOR}
+                  />
                 )}
               </div>
             )}
-
             {/* ── Notice mode ── */}
             {isNoticeMode && activeNotice && (
               <div className="sc" style={{

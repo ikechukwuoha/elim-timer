@@ -6,11 +6,134 @@ const { parse }           = require('url')
 const next                = require('next')
 const fs                  = require('fs')
 const path                = require('path')
+const crypto              = require('crypto')
 
 const dev  = process.env.NODE_ENV !== 'production'
 const port = parseInt(process.env.PORT || '3000', 10)
 const app  = next({ dev })
 const handle = app.getRequestHandler()
+
+const CONTROL_AUTH_COOKIE = 'elim_control_session'
+const CONTROL_AUTH_TTL_SECONDS = 60 * 60 * 12
+const CONTROL_AUTH_MESSAGE = 'Control authentication is not configured. Set ELIM_AUTH_USERNAME, ELIM_AUTH_PASSWORD, and ELIM_SESSION_SECRET.'
+
+function getAuthSettings() {
+  const username = process.env.ELIM_AUTH_USERNAME || 'admin'
+  const password = process.env.ELIM_AUTH_PASSWORD || ''
+  const secret = process.env.ELIM_SESSION_SECRET || ''
+  return { username, password, secret, configured: Boolean(password && secret) }
+}
+
+function signAuthPayload(payload, secret) {
+  return crypto.createHmac('sha256', secret).update(payload).digest('hex')
+}
+
+function createControlSessionToken(username) {
+  const settings = getAuthSettings()
+  const expiresAt = Date.now() + (CONTROL_AUTH_TTL_SECONDS * 1000)
+  const encodedUser = Buffer.from(username, 'utf8').toString('base64url')
+  const payload = `${encodedUser}.${expiresAt}`
+  const signature = signAuthPayload(payload, settings.secret)
+  return `${payload}.${signature}`
+}
+
+function verifyControlSessionToken(token) {
+  const settings = getAuthSettings()
+  if (!token || !settings.secret) return null
+
+  const parts = token.split('.')
+  if (parts.length !== 3) return null
+
+  const [encodedUser, expiresRaw, providedSignature] = parts
+  const payload = `${encodedUser}.${expiresRaw}`
+  const expectedSignature = signAuthPayload(payload, settings.secret)
+  const providedBuffer = Buffer.from(providedSignature, 'utf8')
+  const expectedBuffer = Buffer.from(expectedSignature, 'utf8')
+
+  if (
+    providedBuffer.length !== expectedBuffer.length ||
+    !crypto.timingSafeEqual(providedBuffer, expectedBuffer)
+  ) {
+    return null
+  }
+
+  const expiresAt = Number(expiresRaw)
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return null
+
+  try {
+    const username = Buffer.from(encodedUser, 'base64url').toString('utf8')
+    if (!username) return null
+    return { username, expiresAt }
+  } catch {
+    return null
+  }
+}
+
+function parseCookies(req) {
+  const raw = req.headers.cookie || ''
+  return raw.split(';').reduce((acc, part) => {
+    const trimmed = part.trim()
+    if (!trimmed) return acc
+    const idx = trimmed.indexOf('=')
+    if (idx < 0) return acc
+    const key = trimmed.slice(0, idx)
+    const value = trimmed.slice(idx + 1)
+    acc[key] = decodeURIComponent(value)
+    return acc
+  }, {})
+}
+
+function getSessionFromRequest(req) {
+  const cookies = parseCookies(req)
+  return verifyControlSessionToken(cookies[CONTROL_AUTH_COOKIE])
+}
+
+function sendJson(res, statusCode, payload) {
+  res.statusCode = statusCode
+  res.setHeader('Content-Type', 'application/json')
+  res.end(JSON.stringify(payload))
+}
+
+function setSessionCookie(res, token) {
+  const secure = dev ? '' : '; Secure'
+  res.setHeader(
+    'Set-Cookie',
+    `${CONTROL_AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${CONTROL_AUTH_TTL_SECONDS}${secure}`
+  )
+}
+
+function clearSessionCookie(res) {
+  const secure = dev ? '' : '; Secure'
+  res.setHeader(
+    'Set-Cookie',
+    `${CONTROL_AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${secure}`
+  )
+}
+
+function requireControlAuth(req, res) {
+  const settings = getAuthSettings()
+  if (!settings.configured) {
+    sendJson(res, 503, { error: CONTROL_AUTH_MESSAGE })
+    return null
+  }
+
+  const session = getSessionFromRequest(req)
+  if (!session) {
+    sendJson(res, 401, { error: 'Unauthorized' })
+    return null
+  }
+
+  return session
+}
+
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = ''
+    req.on('data', chunk => { body += chunk.toString() })
+    req.on('end', () => resolve(body))
+    req.on('error', reject)
+  })
+}
 
 // ── Bible DB ──────────────────────────────────────────────────
 let bibleDb = null
@@ -88,20 +211,61 @@ app.prepare().then(() => {
   const server = createServer((req, res) => {
     const parsedUrl = parse(req.url, true)
 
+    if (parsedUrl.pathname === '/api/auth/session' && req.method === 'GET') {
+      const settings = getAuthSettings()
+      const session = settings.configured ? getSessionFromRequest(req) : null
+      return sendJson(res, 200, {
+        configured: settings.configured,
+        authenticated: Boolean(session),
+        username: session?.username ?? null,
+      })
+    }
+
+    if (parsedUrl.pathname === '/api/auth/login' && req.method === 'POST') {
+      const settings = getAuthSettings()
+      if (!settings.configured) {
+        return sendJson(res, 503, { error: CONTROL_AUTH_MESSAGE })
+      }
+
+      readRequestBody(req)
+        .then(raw => {
+          try {
+            const data = JSON.parse(raw || '{}')
+            const { username, password } = data
+
+            if (username !== settings.username || password !== settings.password) {
+              return sendJson(res, 401, { error: 'Invalid username or password.' })
+            }
+
+            setSessionCookie(res, createControlSessionToken(username))
+            return sendJson(res, 200, { success: true, username })
+          } catch {
+            return sendJson(res, 400, { error: 'Invalid JSON' })
+          }
+        })
+        .catch(() => sendJson(res, 500, { error: 'Unable to read request body' }))
+      return
+    }
+
+    if (parsedUrl.pathname === '/api/auth/logout' && req.method === 'POST') {
+      clearSessionCookie(res)
+      return sendJson(res, 200, { success: true })
+    }
+
     // ── GET /api/time — clock sync endpoint ──────────────────
     if (parsedUrl.pathname === '/api/time') {
-      res.setHeader('Content-Type', 'application/json')
-      return res.end(JSON.stringify({ serverTime: Date.now() }))
+      return sendJson(res, 200, { serverTime: Date.now() })
     }
 
     // ── GET /api/timer — retrieve timer state ────────────────
     if (parsedUrl.pathname === '/api/timer' && req.method === 'GET') {
-      res.setHeader('Content-Type', 'application/json')
-      return res.end(JSON.stringify({ state: lastTimerState }))
+      if (!requireControlAuth(req, res)) return
+      return sendJson(res, 200, { state: lastTimerState })
     }
 
     // ── POST /api/timer — save timer state ───────────────────
     if (parsedUrl.pathname === '/api/timer' && req.method === 'POST') {
+      if (!requireControlAuth(req, res)) return
       res.setHeader('Content-Type', 'application/json')
       let body = ''
       req.on('data', chunk => { body += chunk.toString() })
@@ -121,12 +285,13 @@ app.prepare().then(() => {
 
     // ── GET /api/present — retrieve present state ────────────
     if (parsedUrl.pathname === '/api/present' && req.method === 'GET') {
-      res.setHeader('Content-Type', 'application/json')
-      return res.end(JSON.stringify({ state: lastPresentState }))
+      if (!requireControlAuth(req, res)) return
+      return sendJson(res, 200, { state: lastPresentState })
     }
 
     // ── POST /api/present — save present state ───────────────
     if (parsedUrl.pathname === '/api/present' && req.method === 'POST') {
+      if (!requireControlAuth(req, res)) return
       res.setHeader('Content-Type', 'application/json')
       let body = ''
       req.on('data', chunk => { body += chunk.toString() })
@@ -146,6 +311,7 @@ app.prepare().then(() => {
 
     // ── POST /api/timer/log — record completed service timer with overtime ─────────────────
     if (parsedUrl.pathname === '/api/timer/log' && req.method === 'POST') {
+      if (!requireControlAuth(req, res)) return
       res.setHeader('Content-Type', 'application/json')
       if (!timerDb) {
         res.statusCode = 503
@@ -174,6 +340,7 @@ app.prepare().then(() => {
 
     // ── GET /api/timer/logs?from=<ms>&to=<ms> — fetch raw records ─────────────────
     if (parsedUrl.pathname === '/api/timer/logs' && req.method === 'GET') {
+      if (!requireControlAuth(req, res)) return
       res.setHeader('Content-Type', 'application/json')
       if (!timerDb) {
         res.statusCode = 503
@@ -188,6 +355,7 @@ app.prepare().then(() => {
 
     // ── GET /api/timer/report?year=YYYY&month=MM — monthly overtime report ────────────
     if (parsedUrl.pathname === '/api/timer/report' && req.method === 'GET') {
+      if (!requireControlAuth(req, res)) return
       res.setHeader('Content-Type', 'application/json')
       if (!timerDb) {
         res.statusCode = 503
@@ -221,6 +389,7 @@ app.prepare().then(() => {
 
     // ── POST /api/operator-note — save operator note record ─────────────────
     if (parsedUrl.pathname === '/api/operator-note' && req.method === 'POST') {
+      if (!requireControlAuth(req, res)) return
       res.setHeader('Content-Type', 'application/json')
       if (!timerDb) {
         res.statusCode = 503
@@ -249,6 +418,7 @@ app.prepare().then(() => {
 
     // ── GET /api/operator-notes?from=<ms>&to=<ms> — fetch operator notes ─────────
     if (parsedUrl.pathname === '/api/operator-notes' && req.method === 'GET') {
+      if (!requireControlAuth(req, res)) return
       res.setHeader('Content-Type', 'application/json')
       if (!timerDb) {
         res.statusCode = 503
@@ -263,6 +433,7 @@ app.prepare().then(() => {
 
     // ── Bible API ─────────────────────────────────────────────
     if (parsedUrl.pathname.startsWith('/api/bible/')) {
+      if (!requireControlAuth(req, res)) return
       res.setHeader('Content-Type', 'application/json')
       res.setHeader('Access-Control-Allow-Origin', '*')
 
