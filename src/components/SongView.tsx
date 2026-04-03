@@ -13,6 +13,7 @@ export default function SongView({ song, lineIndex, glowColor, timerColor }: Pro
   const prev = lineIndex > 0 ? song.lines[lineIndex - 1] : null
   const curr = song.lines[lineIndex]
   const next = lineIndex < song.lines.length - 1 ? song.lines[lineIndex + 1] : null
+  const currentInterpretation = curr?.interpretation?.trim()
 
   return (
     <div style={{
@@ -59,20 +60,43 @@ export default function SongView({ song, lineIndex, glowColor, timerColor }: Pro
       )}
 
       {/* Current line (bright, main) */}
-      <p style={{
-        fontFamily: 'var(--font-cinzel), serif',
-        fontSize: 'clamp(26px, 5vw, 64px)',
-        fontWeight: 600,
-        color: '#ffffff',
-        lineHeight: 1.3,
-        letterSpacing: '0.04em',
-        textShadow: `0 0 40px ${glowColor}, 0 2px 8px rgba(0,0,0,0.8)`,
-        margin: 0,
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: currentInterpretation ? 14 : 0,
         maxWidth: '85vw',
         transition: 'all 0.4s ease',
       }}>
-        {curr?.text}
-      </p>
+        <p style={{
+          fontFamily: 'var(--font-cinzel), serif',
+          fontSize: 'clamp(26px, 5vw, 64px)',
+          fontWeight: 600,
+          color: '#ffffff',
+          lineHeight: 1.3,
+          letterSpacing: '0.04em',
+          textShadow: `0 0 40px ${glowColor}, 0 2px 8px rgba(0,0,0,0.8)`,
+          margin: 0,
+          maxWidth: '85vw',
+        }}>
+          {curr?.text}
+        </p>
+        {currentInterpretation && (
+          <p style={{
+            fontFamily: 'var(--font-inter), sans-serif',
+            fontSize: 'clamp(18px, 3vw, 36px)',
+            fontWeight: 500,
+            color: 'rgba(255,255,255,0.82)',
+            lineHeight: 1.45,
+            letterSpacing: '0.02em',
+            textShadow: '0 1px 4px rgba(0,0,0,0.55)',
+            margin: 0,
+            maxWidth: '76vw',
+          }}>
+            {currentInterpretation}
+          </p>
+        )}
+      </div>
 
       {/* Next line (faint, below) */}
       {next && (

@@ -10,10 +10,12 @@ export type TimerState = {
   currentIndex:     number
   running:          boolean
   remaining:        number
+  additionalSeconds: number
   overtime:         boolean
   overtimeSeconds:  number
   startedAt:        number | null
   remainingAtStart: number | null
+  activityStartedAt: number | null
 }
 
 export type TimerColor = 'green' | 'yellow' | 'red'
@@ -34,6 +36,17 @@ export interface BibleVerse {
   reference: string
 }
 
+export type BibleDisplayMode = 'single' | 'double'
+export type BibleBackgroundKind = 'solid' | 'image'
+
+export interface BibleBackground {
+  id: string
+  name: string
+  kind: BibleBackgroundKind
+  value: string
+  builtIn?: boolean
+}
+
 export interface BibleChapter {
   book: string
   chapter: number
@@ -44,6 +57,7 @@ export interface BibleChapter {
 export interface SongLine {
   id: number
   text: string
+  interpretation?: string
 }
 
 export interface Song {
@@ -90,11 +104,22 @@ export interface Notice {
   style: 'default' | 'urgent' | 'celebration'
 }
 
+// ── Captions ─────────────────────────────────────────────────
+export interface CaptionCue {
+  id: string
+  text: string
+  kind: 'quote' | 'key-point'
+  sourceText: string
+  score: number
+  createdAt: number
+}
+
 // ── Presentation State ────────────────────────────────────────
 export type PresentMode =
   | 'timer'
   | 'bible'
   | 'song'
+  | 'caption'
   | 'image'
   | 'video'
   | 'presentation'
@@ -106,11 +131,21 @@ export interface PresentState {
 
   // Bible
   activeVerse: BibleVerse | null
+  activeSecondaryVerse: BibleVerse | null
+  bibleDisplayMode: BibleDisplayMode
+  bibleBackgrounds: BibleBackground[]
+  activeBibleBackgroundId: string
+  bibleTextColor: string
+  bibleFontFamilyId: string
+  bibleFontScale: number
 
   // Song
   songs: Song[]
   activeSongId: number | null
   activeLineIndex: number
+
+  // Captions
+  activeCaption: CaptionCue | null
 
   // Images
   images: SlideImage[]

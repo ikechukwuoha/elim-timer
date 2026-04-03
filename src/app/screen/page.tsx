@@ -16,12 +16,19 @@ import {
   PRESENT_CHANNEL_NAME,
   DEFAULT_PRESENT_STATE,
 } from '@/utils/presentStore'
+import {
+  clampBibleFontScale,
+  mergeBibleBackgrounds,
+  resolveBibleBackground,
+  resolveBibleFontFamily,
+} from '@/utils/bibleDisplay'
 import BibleView from '@/components/BibleView'
 import SongView from '@/components/SongView'
 import NoticeView from '@/components/NoticeView'
 import ImageView from '@/components/ImageView'
 import VideoView from '@/components/VideoView'
 import PresentationView from '@/components/PresentationView'
+import CaptionView from '@/components/CaptionView'
 
 const CHURCH_NAME = 'Elim Christian Garden International'
 const BLINK_AT_SECS = 50
@@ -143,7 +150,28 @@ export default function BigScreen() {
               return local ?? slim
             })
           : base.images ?? []
-      const merged: PresentState = { ...base, ...incoming, images: mergedImages }
+      const mergedBibleBackgrounds =
+        incoming.bibleBackgrounds && incoming.bibleBackgrounds.length > 0
+          ? mergeBibleBackgrounds(
+              incoming.bibleBackgrounds.map(background => {
+                if (background.kind === 'image' && !background.value) {
+                  const local = base.bibleBackgrounds?.find(item => item.id === background.id)
+                  return local ?? background
+                }
+                return background
+              })
+            )
+          : mergeBibleBackgrounds(base.bibleBackgrounds ?? [])
+      const merged: PresentState = {
+        ...base,
+        ...incoming,
+        images: mergedImages,
+        bibleBackgrounds: mergedBibleBackgrounds,
+        activeBibleBackgroundId: incoming.activeBibleBackgroundId ?? base.activeBibleBackgroundId,
+        bibleTextColor: incoming.bibleTextColor ?? base.bibleTextColor,
+        bibleFontFamilyId: incoming.bibleFontFamilyId ?? base.bibleFontFamilyId,
+        bibleFontScale: clampBibleFontScale(incoming.bibleFontScale ?? base.bibleFontScale),
+      }
       try { localStorage.setItem('elim_present_state', JSON.stringify(merged)) } catch {}
       return merged
     })
@@ -194,12 +222,13 @@ export default function BigScreen() {
   const isTimerOnly = mode === 'timer'
   const isBibleMode = mode === 'bible'
   const isSongMode = mode === 'song'
+  const isCaptionMode = mode === 'caption'
   const isImageMode = mode === 'image'
   const isVideoMode = mode === 'video'
   const isPresentationMode = mode === 'presentation'
   const isNoticeMode = mode === 'notice'
   const isBlank = mode === 'blank'
-  const isImmersiveMediaMode = isVideoMode || isPresentationMode
+  const isImmersiveMediaMode = isImageMode || isVideoMode || isPresentationMode
   const showWithContent = isBibleMode || isSongMode
 
   const safeActivities = timerState.activities?.length
@@ -207,16 +236,26 @@ export default function BigScreen() {
     : [{ id: 0, name: 'No Activity', duration: 0 }]
   const idx = Math.min(timerState.currentIndex, safeActivities.length - 1)
   const current = safeActivities[idx]
-  const color = getTimerColor(displayRemaining, current.duration * 60)
+  const currentBaseSeconds = Math.max(0, current.duration * 60)
+  const currentTotalSeconds = Math.max(1, currentBaseSeconds + (timerState.additionalSeconds ?? 0))
+  const currentTotalMinutes = currentTotalSeconds / 60
+  const additionalMinutes = (timerState.additionalSeconds ?? 0) / 60
+  const color = getTimerColor(displayRemaining, currentTotalSeconds)
   const theme = COLOR_THEMES[color]
-  const pct = Math.max(0, Math.min(100, current.duration > 0 ? (displayRemaining / (current.duration * 60)) * 100 : 0))
+  const pct = Math.max(0, Math.min(100, currentTotalSeconds > 0 ? (displayRemaining / currentTotalSeconds) * 100 : 0))
   const hasNext = idx < safeActivities.length - 1
   const isOvertime = displayRemaining < 0
+  const activeBibleBackground = resolveBibleBackground(presentState.bibleBackgrounds, presentState.activeBibleBackgroundId)
+  const bibleTextColor = presentState.bibleTextColor || '#ffffff'
+  const bibleFontFamily = resolveBibleFontFamily(presentState.bibleFontFamilyId)
+  const bibleFontScale = clampBibleFontScale(presentState.bibleFontScale)
   const statusTxt = isOvertime ? 'OVERTIME' : theme.statusText
   const isCrit = displayRemaining <= BLINK_AT_SECS
   const showTimerPanel = isTimerOnly || showWithContent
 
   const activeSong = presentState.songs?.find(s => s.id === presentState.activeSongId)
+  const activeSecondaryVerse = presentState.activeSecondaryVerse
+  const activeCaption = presentState.activeCaption
   const activeImage = presentState.images?.find(i => i.id === presentState.activeImageId)
   const activeVideo = presentState.videos?.find(v => v.id === presentState.activeVideoId)
   const activePresentation = presentState.presentations?.find(
@@ -476,8 +515,20 @@ export default function BigScreen() {
                           fontWeight: 700, color: 'rgba(255,255,255,0.55)',
                           letterSpacing: '0.24em', textTransform: 'uppercase', margin: 0,
                         }}>
-                          {current.duration} min
+                          {currentTotalMinutes} min
                         </p>
+                        {additionalMinutes > 0 && (
+                          <p style={{
+                            fontSize: 'clamp(9px,0.75vw,11px)',
+                            fontWeight: 700,
+                            color: '#fcd34d',
+                            letterSpacing: '0.18em',
+                            textTransform: 'uppercase',
+                            margin: 0,
+                          }}>
+                            +{additionalMinutes} min added
+                          </p>
+                        )}
                       </div>
                     )}
 
@@ -555,6 +606,7 @@ export default function BigScreen() {
                     transition: 'background 0.4s, box-shadow 0.4s',
                   }} />
                   {isBlank ? 'Standby'
+                    : isCaptionMode ? 'Caption'
                     : isImageMode ? 'Image'
                     : isVideoMode ? 'Video'
                     : isPresentationMode ? 'Presentation'
@@ -704,18 +756,35 @@ export default function BigScreen() {
                 </p>
 
                 {/* ── MINUTES ALLOCATED ── */}
-                <p style={{
-                  marginTop: isMobile ? '6px' : 'clamp(8px,1vw,16px)',
-                  fontSize: isMobile ? '12px' : 'min(2.8vw,2.8vh)',
-                  fontWeight: 700,
-                  color: 'rgba(255,255,255,0.92)',
-                  letterSpacing: '0.32em',
-                  textTransform: 'uppercase',
-                  textShadow: '0 0 20px rgba(255,255,255,0.3), 0 2px 6px rgba(0,0,0,0.8)',
-                  textAlign: 'center',
-                }}>
-                  {current.duration} minutes allocated
-                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'center' }}>
+                  <p style={{
+                    marginTop: isMobile ? '6px' : 'clamp(8px,1vw,16px)',
+                    fontSize: isMobile ? '12px' : 'min(2.8vw,2.8vh)',
+                    fontWeight: 700,
+                    color: 'rgba(255,255,255,0.92)',
+                    letterSpacing: '0.32em',
+                    textTransform: 'uppercase',
+                    textShadow: '0 0 20px rgba(255,255,255,0.3), 0 2px 6px rgba(0,0,0,0.8)',
+                    textAlign: 'center',
+                    marginBottom: 0,
+                  }}>
+                    {currentTotalMinutes} minutes allocated
+                  </p>
+                  {additionalMinutes > 0 && (
+                    <p style={{
+                      margin: 0,
+                      fontSize: isMobile ? '11px' : 'min(2vw,2vh)',
+                      fontWeight: 700,
+                      color: '#fcd34d',
+                      letterSpacing: '0.18em',
+                      textTransform: 'uppercase',
+                      textShadow: '0 0 16px rgba(251,191,36,0.4)',
+                      textAlign: 'center',
+                    }}>
+                      Additional time: +{additionalMinutes} minutes
+                    </p>
+                  )}
+                </div>
 
                 {/* ── NEXT ACTIVITY PILL ── */}
                 {hasNext && (
@@ -800,8 +869,14 @@ export default function BigScreen() {
                 {isBibleMode && presentState.activeVerse && (
                   <BibleView
                     verse={presentState.activeVerse}
+                    secondaryVerse={activeSecondaryVerse}
+                    displayMode={presentState.bibleDisplayMode}
                     glowColor={PRESENT_GLOW}
                     timerColor={PRESENT_COLOR}
+                    background={activeBibleBackground}
+                    textColor={bibleTextColor}
+                    fontFamily={bibleFontFamily}
+                    fontScale={bibleFontScale}
                   />
                 )}
                 {isSongMode && activeSong && (
@@ -822,6 +897,20 @@ export default function BigScreen() {
               }}>
                 <NoticeView
                   notice={activeNotice}
+                  glowColor={PRESENT_GLOW}
+                  timerColor={PRESENT_COLOR}
+                />
+              </div>
+            )}
+
+            {/* ── Caption mode ── */}
+            {isCaptionMode && activeCaption && (
+              <div className="sc" style={{
+                width: '100%', height: '100%',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <CaptionView
+                  caption={activeCaption}
                   glowColor={PRESENT_GLOW}
                   timerColor={PRESENT_COLOR}
                 />

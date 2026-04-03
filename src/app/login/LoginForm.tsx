@@ -97,8 +97,9 @@ export default function LoginForm({ configured }: { configured: boolean }) {
           {!configured ? (
             <div className={styles.errorBox}>
               Authentication has not been configured yet. Add `ELIM_AUTH_USERNAME`,
-              `ELIM_AUTH_PASSWORD`, and `ELIM_SESSION_SECRET` to `.env.local`, then restart the
-              server.
+              `ELIM_AUTH_PASSWORD`, and `ELIM_SESSION_SECRET` to your environment settings.
+              Use `.env.local` for local development, or your hosting provider&apos;s environment
+              variable settings in production, then redeploy or restart the app.
             </div>
           ) : (
             <form className={styles.form} onSubmit={handleSubmit}>

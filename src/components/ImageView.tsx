@@ -28,33 +28,44 @@ export default function ImageView({ image }: Props) {
     <div style={{
       position: 'absolute',
       inset: 0,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
       background: '#000',
+      overflow: 'hidden',
     }}>
-      <Image
-        src={image.url}
-        alt={image.name}
-        fill
-        style={{ objectFit: 'contain' }}
-        priority
-        unoptimized={image.url?.startsWith('data:') ?? false}
+      <div style={{ position: 'absolute', inset: 0 }}>
+        <Image
+          src={image.url}
+          alt={image.name}
+          fill
+          style={{
+            objectFit: 'cover',
+            objectPosition: 'center',
+            filter: 'blur(20px) brightness(0.52) saturate(1.05)',
+            transform: 'scale(1.08)',
+          }}
+          priority
+          unoptimized={image.url?.startsWith('data:') ?? false}
+        />
+      </div>
+
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          background: 'radial-gradient(circle at center, rgba(255,255,255,0.06) 0%, rgba(0,0,0,0.12) 38%, rgba(0,0,0,0.32) 100%)',
+          pointerEvents: 'none',
+        }}
       />
-      {/* Image name bottom */}
-      <p style={{
-        position: 'absolute',
-        bottom: 28,
-        left: 0, right: 0,
-        textAlign: 'center',
-        fontSize: 13,
-        color: 'rgba(255,255,255,0.35)',
-        letterSpacing: '0.12em',
-        textTransform: 'uppercase',
-        fontFamily: 'var(--font-inter), sans-serif',
-      }}>
-        {image.name}
-      </p>
+
+      <div style={{ position: 'absolute', inset: 0 }}>
+        <Image
+          src={image.url}
+          alt={image.name}
+          fill
+          style={{ objectFit: 'contain', objectPosition: 'center' }}
+          priority
+          unoptimized={image.url?.startsWith('data:') ?? false}
+        />
+      </div>
     </div>
   )
 }

@@ -10,10 +10,12 @@ export const DEFAULT_STATE: TimerState = {
   currentIndex:     0,
   running:          false,
   remaining:        0,
+  additionalSeconds: 0,
   overtime:         false,
   overtimeSeconds:  0,
   startedAt:        null,
   remainingAtStart: null,
+  activityStartedAt: null,
 }
 
 // ── Server clock offset ───────────────────────────────────────
@@ -47,6 +49,9 @@ export function loadState(): TimerState {
       ...parsed,
       activities: Array.isArray(parsed.activities) ? parsed.activities : [],
     }
+    if (merged.activityStartedAt == null && merged.startedAt != null) {
+      merged.activityStartedAt = merged.startedAt
+    }
     _latestState = merged
     return merged
   } catch {
@@ -67,8 +72,10 @@ function buildPayload(state: TimerState, includeActivities: boolean) {
   const base = {
     currentIndex:    state.currentIndex,
     running:         state.running,
+    additionalSeconds: state.additionalSeconds,
     overtime:        state.overtime,
     overtimeSeconds: state.overtimeSeconds,
+    activityStartedAt: state.activityStartedAt,
     ...(includeActivities ? { activities: state.activities } : {}),
   }
 

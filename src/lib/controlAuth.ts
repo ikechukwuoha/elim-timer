@@ -3,7 +3,7 @@ import crypto from 'node:crypto'
 export const CONTROL_AUTH_COOKIE = 'elim_control_session'
 export const CONTROL_AUTH_TTL_SECONDS = 60 * 60 * 12
 export const CONTROL_AUTH_MESSAGE =
-  'Control authentication is not configured. Set ELIM_AUTH_USERNAME, ELIM_AUTH_PASSWORD, and ELIM_SESSION_SECRET.'
+  'Control authentication is not configured. Set ELIM_AUTH_USERNAME, ELIM_AUTH_PASSWORD, and ELIM_SESSION_SECRET in your environment.'
 
 type ControlAuthSettings = {
   username: string
