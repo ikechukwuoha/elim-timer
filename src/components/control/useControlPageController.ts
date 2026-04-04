@@ -561,15 +561,7 @@ export function useControlPageController() {
       }
 
       const [authRes, clockRes, timerRes, presentRes] = await Promise.all([
-        fetch('/api/auth/session', { method: 'GET', cache: 'no-store' })
-          .then(async res => {
-            if (!res.ok) return { ok: false as const }
-            const data = await res.json().catch(() => null)
-            return {
-              ok: Boolean(data?.configured && data?.authenticated),
-            }
-          })
-          .catch(() => ({ ok: false as const })),
+        Promise.resolve({ ok: true as const }),
         fetch('/api/time', { method: 'GET', cache: 'no-store' })
           .then(async res => {
             if (!res.ok) return { ok: false as const }
@@ -2633,13 +2625,6 @@ export function useControlPageController() {
     updater: prev => (prev.mode === 'timer' ? prev : setMode(prev, 'timer')),
   })
 
-  const logoutControl = async () => {
-    try {
-      await fetch('/api/auth/logout', { method: 'POST' })
-    } catch {}
-    window.location.assign('/login?logged_out=1')
-  }
-
   shortcutActionsRef.current = { startPause, goNext, goPrev, jumpToVerse, songLine }
 
   useEffect(() => {
@@ -3152,9 +3137,6 @@ export function useControlPageController() {
       onBlankScreen: goBlank,
       onShowTimer: goTimerMode,
       onOpenBigScreen: handleOpenBigScreen,
-      onLogout: () => {
-        void logoutControl()
-      },
     },
     tabBarProps: {
       tabs: TAB_OPTIONS,

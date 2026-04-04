@@ -8,7 +8,6 @@ type ControlHeaderProps = {
   onBlankScreen: () => void
   onShowTimer: () => void
   onOpenBigScreen: () => void
-  onLogout: () => void
 }
 
 export default function ControlHeader({
@@ -19,7 +18,6 @@ export default function ControlHeader({
   onBlankScreen,
   onShowTimer,
   onOpenBigScreen,
-  onLogout,
 }: ControlHeaderProps) {
   return (
     <header style={styles.header}>
@@ -67,7 +65,6 @@ export default function ControlHeader({
         <button onClick={onBlankScreen} style={styles.headerBtnNeutral}>Blank Screen</button>
         <button onClick={onShowTimer} style={styles.headerBtnGreen}>Show Timer</button>
         <button onClick={onOpenBigScreen} style={styles.bigScreenBtn}>Open Big Screen</button>
-        <button onClick={onLogout} style={styles.headerBtnDanger}>Logout</button>
       </div>
     </header>
   )
